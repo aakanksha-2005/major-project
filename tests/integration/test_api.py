@@ -121,7 +121,7 @@ async def test_chat_approval_gated_tool_pends_without_execution(client, demo_hea
     assert "approval" in data["text"].lower()
     assert builtin.EXECUTION_LOG == []  # nothing executed pre-approval
     # Pending record exists in the approval store.
-    record = container.approvals.get(data["approval_ids"][0])
+    record = await container.approvals.get(data["approval_ids"][0])
     assert record is not None and record.status.value == "pending"
 
 
@@ -151,7 +151,7 @@ async def test_chat_flags_injection_but_still_responds(client, demo_headers):
 
 
 async def test_step_budget_fallback(settings):
-    app = create_app(Settings(max_agent_steps=1))
+    app = create_app(Settings(max_agent_steps=1, persistence="in_memory"))
     from httpx import ASGITransport, AsyncClient
 
     transport = ASGITransport(app=app)

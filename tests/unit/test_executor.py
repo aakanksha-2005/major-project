@@ -267,7 +267,7 @@ async def test_policy_evaluation_error_fails_closed(stack, monkeypatch):
     assert outcome.result.status == ExecutionStatus.BLOCKED
     assert stack.calls == []
     # The failure is auditable.
-    events = stack.audit.query(request_id="req-exec-test")
+    events = await stack.audit.query(request_id="req-exec-test")
     decision_events = [e for e in events if e.event_type.value == "policy_decision"]
     assert decision_events and decision_events[0].error_category == "PolicyEvaluationError"
 
@@ -287,7 +287,7 @@ async def test_approval_required_creates_pending_and_does_not_execute(stack):
     assert outcome.result.status == ExecutionStatus.PENDING_APPROVAL
     assert outcome.approval_id
     assert "publish_announcement:t" not in stack.calls  # nothing executed
-    stored = stack.approvals.get(outcome.approval_id)
+    stored = await stack.approvals.get(outcome.approval_id)
     assert stored is not None and stored.status == ApprovalStatus.PENDING
 
 
@@ -396,7 +396,7 @@ async def test_output_item_cap_is_enforced_not_advisory(stack):
 
 async def test_successful_execution_emits_decision_and_execution_events(stack):
     await stack.run("counted_tool", {"arg": "audit-me"})
-    events = stack.audit.query(request_id="req-exec-test")
+    events = await stack.audit.query(request_id="req-exec-test")
     types = [e.event_type.value for e in events]
     assert "policy_decision" in types
     decision_event = next(e for e in events if e.event_type.value == "policy_decision")
@@ -410,7 +410,7 @@ async def test_successful_execution_emits_decision_and_execution_events(stack):
 
 async def test_denied_execution_event_records_not_executed(stack):
     outcome = await stack.run("not_a_registered_tool", {})
-    events = stack.audit.query(request_id="req-exec-test")
+    events = await stack.audit.query(request_id="req-exec-test")
     decision_event = next(e for e in events if e.event_type.value == "policy_decision")
     assert decision_event.execution_status == "not_executed"
     assert decision_event.reason_code == ReasonCode.UNKNOWN_TOOL

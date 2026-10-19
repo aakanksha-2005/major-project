@@ -1,9 +1,13 @@
 """Shared test fixtures.
 
-All tests run without external model credentials, PostgreSQL, or network
-access (Milestone 1 strategy): the mock adapter and in-memory audit/approval
-stores are the documented targets. PostgreSQL-backed fixtures arrive in
-Milestone 2 without changing these call sites.
+Milestone 1+2 documented test strategy (see docs/DEVELOPMENT.md):
+
+- The default suite runs WITHOUT PostgreSQL, model credentials, or
+  network access: fixtures set `persistence="in_memory"` explicitly —
+  an opt-out, never a silent database substitution.
+- PostgreSQL-backed tests live under `tests/postgres/`, are marked
+  `postgres`, use an isolated `*_test` database, and SKIP with an
+  explicit reason when the server is unreachable.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ def headers_for(principal: str, perms: str = "") -> dict[str, str]:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(policy_path="config/policies.example.yaml")
+    return Settings(policy_path="config/policies.example.yaml", persistence="in_memory")
 
 
 @pytest.fixture

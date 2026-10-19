@@ -43,8 +43,21 @@ class Settings(BaseSettings):
     audit_pseudonym_salt: str = "dev-only-salt-rotate-in-production"
     audit_buffer_size: int = Field(default=5000, ge=16)
 
-    # Approval lifecycle (in-memory for M1; PostgreSQL-backed in later milestones).
+    # Approval lifecycle: TTL for pending records (both backends).
     approval_ttl_seconds: int = Field(default=900, ge=30)
+
+    # Milestone 2 persistence: PostgreSQL is the target store.
+    # "postgres" (default) requires a reachable database before sensitive
+    # actions execute (fail closed). "in_memory" is an EXPLICIT opt-out for
+    # local demos and the M1 test suite — never a silent substitution.
+    persistence: str = "postgres"  # Literal["postgres", "in_memory"]
+    # Host port 5433 (not 5432): the shipped docker-compose.yml publishes
+    # 5433 so RASP never collides with an existing local PostgreSQL.
+    database_url: str = "postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp"
+    database_pool_size: int = Field(default=5, ge=1, le=30)
+    database_pool_timeout: float = Field(default=5.0, gt=0, le=60)
+    # Bound every statement so a hung database cannot hang enforcement.
+    database_statement_timeout_ms: int = Field(default=5000, ge=100, le=60000)
 
 
 def load_settings() -> Settings:

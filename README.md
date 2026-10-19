@@ -2,7 +2,7 @@
 
 **Runtime security and authorization layer for LLM applications and tool-using AI agents.**
 
-> **Status: experimental prototype (v0.1.0, Milestone 1) — not production-certified.**
+> **Status: experimental prototype (v0.1.0, Milestone 2) — not production-certified.**
 > RASP is not a firewall replacement, a truth detector, or a guarantee against
 > prompt injection. See [Known Limitations](docs/LIMITATIONS.md) before relying
 > on any control described here.
@@ -26,19 +26,22 @@ approvals, and risk scores cannot override application-enforced permissions.
 |---|---|---|
 | M0 | Repo baseline, architecture, threat model | ✅ done |
 | M1 | Mock model + registry + policy engine + executor + audit + tests | ✅ done |
-| M2 | PostgreSQL persistence (SQLAlchemy, Alembic) | ⏳ next |
-| M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | planned |
+| M2 | PostgreSQL persistence (SQLAlchemy, Alembic) | ✅ done |
+| M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | ⏳ next |
 | M4 | Local LLM adapter | planned |
 | M5 | Adversarial evaluation report with metrics | planned |
 | M6 | Controlled pilot preparation | planned |
 
 **Implemented now:** deterministic mock model, 6 synthetic tools, deterministic
 policy engine (allow / deny / require_approval / allow_with_constraints),
-controlled executor with timeouts and output validation, in-memory audit with
-pseudonymized principals, pending-approval creation with digest binding,
-body-size limits, development header identity, REST API, 144 automated tests.
+controlled executor with timeouts and output validation, PostgreSQL persistence
+for audit events, approvals and policy metadata (SQLAlchemy async + Alembic;
+`in_memory` remains an explicit opt-out), pseudonymized principals,
+digest-bound pending approvals with a validated state machine, body-size
+limits, development header identity, REST API, **173 automated tests**
+(including 10 that run against a real PostgreSQL instance).
 
-**Planned (not implemented):** PostgreSQL, approval reviewer endpoints, local
+**Planned (not implemented):** approval reviewer endpoints, local
 LLM adapter, rate limiting, real authentication, comparative evaluation harness.
 
 ## 3. Architecture and request lifecycle
@@ -72,7 +75,8 @@ Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## 5. Features: implemented vs planned
 
 See status table in §2. Every "implemented" claim is covered by a test in
-`tests/` and was executed for this release (**144 passed**).
+`tests/` and was executed for this release (**173 passed**, including 10
+PostgreSQL-backed tests; 0 skipped when the database is running).
 
 ## 6. Supported model adapters
 
@@ -89,8 +93,10 @@ Setting `RASP_MODEL_PROVIDER` to anything unimplemented **refuses startup**
 
 - **Python ≥ 3.12** (developed on 3.14)
 - **[uv](https://docs.astral.sh/uv/)** (dependency/env management)
-- No API keys, no database, no network needed for Milestone 1
-- (Later) Docker for PostgreSQL — Milestone 2
+- **Docker** (or a native PostgreSQL ≥ 14) for the default persistent mode
+- No API keys or network access are needed. The default test suite still runs
+  without PostgreSQL (it uses the explicit `in_memory` mode); only the
+  `postgres`-marked tests need a database.
 
 ## 8. Local installation (verified)
 
@@ -107,14 +113,38 @@ Copy-Item .env.example .env   # edit as needed; NEVER commit .env
 ```
 
 Key settings: `RASP_POLICY_PATH`, `RASP_MODEL_PROVIDER=mock`,
-`RASP_MAX_AGENT_STEPS`, `RASP_MAX_REQUEST_BYTES`, `RASP_DEV_AUTH_ENABLED`.
+`RASP_MAX_AGENT_STEPS`, `RASP_MAX_REQUEST_BYTES`, `RASP_DEV_AUTH_ENABLED`,
+`RASP_PERSISTENCE` (`postgres` default, or explicit `in_memory`),
+`RASP_DATABASE_URL` (default `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp`).
 Full list: [.env.example](.env.example).
 
 ## 10. Database initialization and migrations
 
-**Not in Milestone 1.** Audit events and pending approvals are in-memory
-and lost on restart. PostgreSQL + Alembic migrations are Milestone 2; this
-section will be replaced with verified commands when implemented.
+PostgreSQL is the default persistence layer; `in_memory` is an explicit
+opt-out (restart loses everything). The schema is created **only** through
+Alembic migrations.
+
+```powershell
+docker compose up -d            # PostgreSQL 16 on host port 5433 + rasp_test DB
+uv run alembic upgrade head     # create/upgrade the schema (idempotent)
+uv run alembic current          # → 0001_initial (head)
+```
+
+Notes:
+
+- Host port **5433** (not 5432) so RASP never collides with an existing local
+  PostgreSQL; the compose file and `RASP_DATABASE_URL` must be changed together.
+- Development-only credentials (`rasp`/`rasp`) are documented placeholders.
+- Audit events, approvals, and policy metadata survive application restarts;
+  this was verified end-to-end (chat + denied tool + approval request, restart,
+  then `/v1/audit` and the approval row still present).
+- **Database failure never authorizes an action**: if the audit write for a
+  mutating tool cannot be persisted, the executor denies with
+  `reason_code: persistence_error` *before* the handler runs. Read-only tools
+  may still run but are flagged `audit_persistence_failed`; `/v1/audit`
+  returns a structured `503 persistence_unavailable` instead of crashing.
+- Full runbook (backup/restore, failure matrix, test DB safety):
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## 11. Application startup (verified)
 
@@ -214,17 +244,23 @@ permission → approval → allow. A deny at any step is final.
 ## 15. Running automated tests (verified)
 
 ```powershell
-uv run pytest                  # full suite: 144 passed
+uv run pytest                  # full suite: 173 passed (with PostgreSQL running)
+uv run pytest -m "not postgres"  # 163 passed — no database required
+uv run pytest -m postgres        # 10 passed against rasp_test
 uv run pytest tests/unit
 uv run pytest tests/integration
 uv run pytest tests/adversarial
-uv run ruff check src tests    # All checks passed
-uv run ruff format --check src tests
+uv run ruff check src tests migrations    # All checks passed
+uv run ruff format --check src tests migrations
 ```
 
-No PostgreSQL, model credentials, or network are required. Milestone-2
-database tests will use isolated fixtures and will be labeled separately
-from skipped/available-infrastructure tests.
+The default suite sets `RASP_PERSISTENCE=in_memory` explicitly, so unit,
+integration and adversarial tests need **no** database, model credentials, or
+network. PostgreSQL tests live in `tests/postgres/` and are marked `postgres`:
+when the server is unreachable they **skip with an explicit reason** ("SKIPPED,
+not passed") and are never silently redirected to SQLite or another engine.
+They use an isolated `*_test` database and refuse to run destructive fixtures
+against any database name lacking "test".
 
 ## 16. Security and privacy design
 
@@ -252,10 +288,11 @@ from skipped/available-infrastructure tests.
 
 ## 18. Known limitations
 
-Summarized: development-only identity; in-memory state (restart loses
-audit/approvals); pattern-based injection/secret detection is incomplete;
-no rate limiting; no local LLM yet; approval decisions not yet reachable
-through the API (pending-only); single-process prototype.
+Summarized: development-only identity; PostgreSQL fails closed but is a
+single unencrypted instance (no HA/signing, `in_memory` remains an opt-out);
+pattern-based injection/secret detection is incomplete; no rate limiting; no
+local LLM yet; approval decisions not yet reachable through the API
+(pending-only); single-process prototype.
 Full list: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ## 19. Security vulnerability reporting

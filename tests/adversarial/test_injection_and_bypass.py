@@ -208,7 +208,7 @@ async def test_indirect_injection_in_content_still_denied(client, demo_headers):
 
 
 async def test_oversized_request_body_rejected():
-    app = create_app(Settings(max_request_bytes=1024))
+    app = create_app(Settings(max_request_bytes=1024, persistence="in_memory"))
     from httpx import ASGITransport, AsyncClient
 
     transport = ASGITransport(app=app)
@@ -224,7 +224,7 @@ async def test_oversized_request_body_rejected():
 
 async def test_step_budget_stops_tool_loop(client, demo_headers):
     """Even a model proposing endless calls stops at the configured budget."""
-    app = create_app(Settings(max_agent_steps=2))
+    app = create_app(Settings(max_agent_steps=2, persistence="in_memory"))
     from httpx import ASGITransport, AsyncClient
 
     transport = ASGITransport(app=app)

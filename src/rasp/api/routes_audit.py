@@ -10,11 +10,15 @@ the AuditEvent schema).
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Query
 
 from rasp.api.deps import Principal, get_container, get_principal
 from rasp.api.errors import error_response
 from rasp.container import Container
+
+logger = logging.getLogger("rasp.api.audit")
 
 router = APIRouter(tags=["audit"])
 
@@ -35,12 +39,21 @@ async def read_audit(
         # Scope to the caller's own events; others' records stay hidden.
         principal_refs = [container.audit.principal_ref(principal.principal_id)]
 
-    events = container.audit.query(
-        request_id=request_id,
-        principal_refs=principal_refs,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        events = await container.audit.query(
+            request_id=request_id,
+            principal_refs=principal_refs,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception:
+        # Storage outage: honest 503 instead of an unhandled crash.
+        logger.exception("audit query failed")
+        return error_response(
+            503,
+            "persistence_unavailable",
+            "Audit storage is temporarily unavailable.",
+        )
     return {
         "events": [event.model_dump(mode="json") for event in events],
         "count": len(events),

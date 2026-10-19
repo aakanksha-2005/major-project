@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from rasp.approvals.store import ApprovalStore
 from rasp.schemas.approval import (
     ApprovalRecord,
@@ -97,13 +99,13 @@ def test_expired_is_invalid():
     assert not record.is_valid_for(action_digest=_valid_args_digest(), principal_ref="p1")
 
 
-# --- store ---------------------------------------------------------------------
+# --- store (async facade, in-memory backend) -------------------------------------
 
 
-def test_create_pending_and_get():
+async def test_create_pending_and_get():
     store = ApprovalStore(ttl_seconds=60)
     digest = compute_action_digest("t", {}, "p", "1.0")
-    record = store.create_pending(
+    record = await store.create_pending(
         request_id="req",
         principal_ref="p",
         tool_id="t",
@@ -111,18 +113,60 @@ def test_create_pending_and_get():
         policy_version="1.0",
     )
     assert record.status == ApprovalStatus.PENDING
-    fetched = store.get(record.approval_id)
+    fetched = await store.get(record.approval_id)
     assert fetched is not None and fetched.approval_id == record.approval_id
 
 
-def test_get_unknown_returns_none():
-    assert ApprovalStore().get("missing") is None
+async def test_duplicate_pending_for_same_action_is_idempotent():
+    """Re-submitting the identical action returns the SAME pending record."""
+    store = ApprovalStore(ttl_seconds=60)
+    digest = compute_action_digest("t", {"a": 1}, "p", "1.0")
+    first = await store.create_pending(
+        request_id="req-1",
+        principal_ref="p",
+        tool_id="t",
+        action_digest=digest,
+        policy_version="1.0",
+    )
+    second = await store.create_pending(
+        request_id="req-2",  # different request, identical action
+        principal_ref="p",
+        tool_id="t",
+        action_digest=digest,
+        policy_version="1.0",
+    )
+    assert second.approval_id == first.approval_id
+    records = await store.all()
+    assert len(records) == 1  # never two parallel approvals for one action
 
 
-def test_stale_pending_lazily_expires():
+async def test_different_action_gets_its_own_pending():
+    store = ApprovalStore(ttl_seconds=60)
+    a = await store.create_pending(
+        request_id="r1",
+        principal_ref="p",
+        tool_id="t",
+        action_digest=compute_action_digest("t", {"a": 1}, "p", "1.0"),
+        policy_version="1.0",
+    )
+    b = await store.create_pending(
+        request_id="r2",
+        principal_ref="p",
+        tool_id="t",
+        action_digest=compute_action_digest("t", {"a": 2}, "p", "1.0"),
+        policy_version="1.0",
+    )
+    assert a.approval_id != b.approval_id
+
+
+async def test_get_unknown_returns_none():
+    assert await ApprovalStore().get("missing") is None
+
+
+async def test_stale_pending_lazily_expires():
     store = ApprovalStore(ttl_seconds=30)
     digest = compute_action_digest("t", {}, "p", "1.0")
-    record = store.create_pending(
+    record = await store.create_pending(
         request_id="req",
         principal_ref="p",
         tool_id="t",
@@ -130,9 +174,84 @@ def test_stale_pending_lazily_expires():
         policy_version="1.0",
     )
     # Force expiry as if time passed.
-    store._records[record.approval_id] = record.model_copy(
+    store.backend._records[record.approval_id] = record.model_copy(
         update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
     )
-    fetched = store.get(record.approval_id)
+    fetched = await store.get(record.approval_id)
     assert fetched is not None
     assert fetched.status == ApprovalStatus.EXPIRED
+
+
+# --- approval state machine (Milestone 2 acceptance) ------------------------------
+
+
+async def _pending(store: ApprovalStore) -> ApprovalRecord:
+    return await store.create_pending(
+        request_id="req",
+        principal_ref="p",
+        tool_id="t",
+        action_digest=compute_action_digest("t", {}, "p", "1.0"),
+        policy_version="1.0",
+    )
+
+
+async def test_pending_can_be_approved_with_reviewer():
+    store = ApprovalStore(ttl_seconds=60)
+    record = await _pending(store)
+    approved = await store.transition(
+        record.approval_id, ApprovalStatus.APPROVED, reviewer_ref="reviewer-1"
+    )
+    assert approved.status == ApprovalStatus.APPROVED
+    assert approved.reviewer_ref == "reviewer-1"
+    assert approved.decided_at is not None
+
+
+async def test_pending_can_be_rejected():
+    store = ApprovalStore(ttl_seconds=60)
+    record = await _pending(store)
+    rejected = await store.transition(record.approval_id, ApprovalStatus.REJECTED)
+    assert rejected.status == ApprovalStatus.REJECTED
+
+
+async def test_rejected_is_terminal_no_reopening():
+    from rasp.approvals.store import InvalidApprovalTransition
+
+    store = ApprovalStore(ttl_seconds=60)
+    record = await _pending(store)
+    await store.transition(record.approval_id, ApprovalStatus.REJECTED)
+    with pytest.raises(InvalidApprovalTransition):
+        await store.transition(record.approval_id, ApprovalStatus.APPROVED)
+
+
+async def test_approved_cannot_be_rejected_only_invalidated():
+    from rasp.approvals.store import InvalidApprovalTransition
+
+    store = ApprovalStore(ttl_seconds=60)
+    record = await _pending(store)
+    await store.transition(record.approval_id, ApprovalStatus.APPROVED)
+    with pytest.raises(InvalidApprovalTransition):
+        await store.transition(record.approval_id, ApprovalStatus.REJECTED)
+    # Revocation remains possible.
+    revoked = await store.transition(record.approval_id, ApprovalStatus.INVALIDATED)
+    assert revoked.status == ApprovalStatus.INVALIDATED
+
+
+async def test_expired_is_terminal():
+    from rasp.approvals.store import InvalidApprovalTransition
+
+    store = ApprovalStore(ttl_seconds=60)
+    record = await _pending(store)
+    store.backend._records[record.approval_id] = record.model_copy(
+        update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+    await store.get(record.approval_id)  # lazily flips to expired
+    with pytest.raises(InvalidApprovalTransition):
+        await store.transition(record.approval_id, ApprovalStatus.APPROVED)
+
+
+async def test_transition_unknown_id_raises_not_found():
+    from rasp.approvals.store import ApprovalNotFoundError
+
+    store = ApprovalStore(ttl_seconds=60)
+    with pytest.raises(ApprovalNotFoundError):
+        await store.transition("missing", ApprovalStatus.APPROVED)

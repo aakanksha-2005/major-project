@@ -1,0 +1,33 @@
+# Milestone 2: local PostgreSQL for RASP.
+#
+#   docker compose up -d          # start the dev database
+#   uv run alembic upgrade head   # initialize/migrate the schema
+#   uv run uvicorn rasp.main:app  # run the application
+#
+# Development credentials ONLY (documented, non-secret): change them before
+# any shared deployment. The test suite uses the separate `rasp_test`
+# database created by docker/postgres-init.sql and never touches `rasp`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rasp-postgres
+    environment:
+      POSTGRES_USER: rasp
+      POSTGRES_PASSWORD: rasp
+      POSTGRES_DB: rasp
+    ports:
+      # Host port 5433: avoids colliding with any PostgreSQL already using
+      # 5432 on the host. Change both this and RASP_DATABASE_URL together.
+      - "5433:5432"
+    volumes:
+      - rasp_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rasp -d rasp"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  rasp_pgdata:

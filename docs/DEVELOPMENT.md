@@ -1,16 +1,22 @@
 # RASP — Development Guide
 
 **Stack:** Python ≥3.12 (developed on 3.14), FastAPI, Pydantic 2.x,
-jsonschema, pytest, ruff. PostgreSQL arrives in Milestone 2.
+jsonschema, SQLAlchemy 2.x async + asyncpg (PostgreSQL), Alembic,
+pytest, ruff.
 
 ## 1. Setup
 
 ```powershell
 # from the repository root
 uv sync            # creates .venv and installs runtime + dev dependencies
+# PostgreSQL for the default persistent mode (and the postgres-marked tests):
+docker compose up -d
+uv run alembic upgrade head
 ```
 
-No API keys or database are required for Milestone 1.
+No API keys or network access are required. Tests do **not** require a
+database (the default suite forces the explicit `in_memory` mode); only the
+`postgres`-marked tests do.
 
 ## 2. Run the application
 
@@ -25,9 +31,11 @@ Bash equivalent: `scripts/run_dev.sh`.
 ## 3. Quality gates (run before every commit)
 
 ```powershell
-uv run pytest                 # full suite
-uv run ruff check src tests   # lint
-uv run ruff format src tests  # format
+uv run pytest                 # full suite (needs PostgreSQL for the last 10)
+uv run pytest -m "not postgres"  # everything that runs without a database
+uv run pytest -m postgres     # isolated rasp_test database only
+uv run ruff check src tests migrations   # lint
+uv run ruff format src tests migrations  # format
 ```
 
 Individual groups:
@@ -36,6 +44,7 @@ Individual groups:
 uv run pytest tests/unit
 uv run pytest tests/integration
 uv run pytest tests/adversarial
+uv run pytest tests/postgres
 ```
 
 ## 4. Configuration
@@ -51,6 +60,10 @@ security-relevant settings:
 | `RASP_MAX_REQUEST_BYTES` | `1000000` | 413 beyond this |
 | `RASP_DEV_AUTH_ENABLED` | `true` | development header identity |
 | `RASP_STORE_PRINCIPAL_IDS` | `false` | keep false: audit pseudonymization |
+| `RASP_PERSISTENCE` | `postgres` | `in_memory` is an explicit, documented opt-out |
+| `RASP_DATABASE_URL` | `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp` | never commit real credentials |
+| `RASP_DATABASE_STATEMENT_TIMEOUT_MS` | `5000` | hung queries become denials |
+| `RASP_DATABASE_POOL_SIZE` / `_POOL_TIMEOUT` | `5` / `5.0` | asyncpg pool sizing |
 
 ## 5. Identity headers (development only)
 
@@ -87,14 +100,38 @@ Missing headers ⇒ zero permissions ⇒ everything sensitive is denied
 ## 8. Testing strategy
 
 - **Unit** — components in isolation (engine, registry, executor with
-  counter handlers, approval digests, audit/redaction).
+  counter handlers, approval digests/state machine, audit/redaction,
+  fail-closed persistence doubles).
 - **Integration** — full ASGI app via httpx; no network, no DB, no keys.
+  Includes an unreachable-database suite proving handlers are never reached.
 - **Adversarial** — injection, impersonation, tampering, bypass, size
   limits; every assertion proves enforcement or flags the gap honestly.
-- Tests must remain runnable without PostgreSQL/local-model infrastructure
-  until those milestones land (documented fixtures, not silent skips).
+- **PostgreSQL** (`tests/postgres/`, marker `postgres`) — real database:
+  clean migration state, restart durability, approval transitions,
+  duplicate-pending idempotency, audit scoping, content-free storage.
+- The default suite forces `RASP_PERSISTENCE=in_memory` (see
+  `tests/conftest.py`) so it stays runnable without infrastructure.
+- PostgreSQL tests **skip with an explicit reason** when unreachable — never
+  a silent pass or a substitute engine. Destructive fixtures refuse to run
+  unless the database name contains "test".
 
-## 9. Contribution workflow
+## 9. Migrations
+
+The schema is defined once in `migrations/versions/`; never create tables by
+hand or at import time.
+
+```powershell
+uv run alembic upgrade head        # apply
+uv run alembic current             # verify revision
+uv run alembic revision -m "..."   # new empty revision for the next change
+```
+
+`migrations/env.py` reads the URL from `RASP_DATABASE_URL` (nothing secret in
+`alembic.ini`) and runs through the async engine, so the same asyncpg driver
+serves the app and migrations. After any model change, update the migration
+and re-run the full suite with PostgreSQL up.
+
+## 10. Contribution workflow
 
 1. Inspect existing code before changing it; preserve others' work.
 2. Small, reviewable commits; explain security-relevant decisions in the

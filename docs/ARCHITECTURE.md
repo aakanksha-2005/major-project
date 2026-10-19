@@ -1,7 +1,7 @@
 # RASP — Architecture
 
-**Status:** Milestone 1 (mock-model prototype) · **Version:** 0.1.0 ·
-**Not production-certified**
+**Status:** Milestone 2 (mock-model prototype with PostgreSQL persistence) ·
+**Version:** 0.1.0 · **Not production-certified**
 
 ## 1. Purpose
 
@@ -51,10 +51,12 @@ ToolRegistry (tools/) ── trusted, application-registered handlers only
 
 - **Policy engine** (`policy/`) — deterministic, independently testable,
   documented precedence, fail-closed on internal error.
-- **Audit** (`audit/`) — in-memory bounded buffer (M1), pseudonymized
-  principals, structural no-content guarantee (see §5).
-- **Approvals** (`approvals/`) — pending records with digest binding and
-  expiry (decision endpoints arrive in Milestone 3).
+- **Audit** (`audit/`) — pseudonymized principals, structural no-content
+  guarantee; PostgreSQL-backed by default (`persistence/`), explicit
+  in-memory opt-out (see §5).
+- **Approvals** (`approvals/`) — digest-bound pending records with expiry and
+  a validated state machine; PostgreSQL-backed by default (decision
+  endpoints arrive in Milestone 3).
 - **Risk signals** (`risk/`) — supplementary flags; never override authz.
 - **Privacy** (`privacy/`) — output screening, redaction, item caps.
 
@@ -89,17 +91,45 @@ Schema) → fresh policy decision → deny / pending approval / enforce
 constraints → timeout → execute registered handler → validate output
 schema → disclosure screening → audit.
 
-## 5. Persistence (Milestone 1 decision)
+## 5. Persistence (Milestone 2)
 
-Milestone 1 uses **in-memory stores** behind small interfaces:
+Persistence sits behind the same small interfaces introduced in Milestone 1;
+call sites did not change:
 
-- `AuditService` (bounded `deque`, threading lock)
-- `ApprovalStore` (TTL, lazy expiry)
+- `AuditService` → `AuditStore` protocol → `PostgresAuditStore` (default) or
+  `InMemoryAuditStore` (explicit opt-out)
+- `ApprovalStore` → `ApprovalBackend` protocol → `PostgresApprovalBackend`
+  (default) or `InMemoryApprovalBackend`
 
-Rationale (per approved plan): mock-model tests must run without
-PostgreSQL. Milestone 2 replaces the internals with PostgreSQL repositories
-(SQLAlchemy 2.x + Alembic) without changing call sites. **Not durable yet —
-events are lost on restart (documented in LIMITATIONS.md).**
+Selected by `RASP_PERSISTENCE` (`postgres` default / `in_memory`). An unknown
+value **refuses startup** — there is no silent fallback. The PostgreSQL
+implementation uses SQLAlchemy 2.x async + asyncpg, with the schema created
+exclusively by Alembic (`alembic upgrade head`). Three tables:
+
+| Table | Contents |
+|---|---|
+| `policies` | which policy version/config was in force (JSON), persisted lazily on first decision event |
+| `approval_requests` | digest-bound approvals; status CHECK constraint; partial unique index = at most one **pending** record per exact action |
+| `audit_events` | sanitized, content-free columns mirroring the audit schema (no prompts, arguments, outputs, or secrets — there is no column for them) |
+
+Security-relevant properties:
+
+- **Fail closed:** a mutating tool requires its pre-execution
+  `TOOL_EXECUTION`/`authorized` audit event to persist *before* the handler
+  runs; otherwise the decision is `DENY` with `reason_code: persistence_error`.
+  A pending approval that cannot be persisted also denies.
+- **Documented fallback:** read-only tools and plain chat may complete when the
+  post-hoc audit write fails, but the outcome carries
+  `security_flags: ["audit_persistence_failed"]`; `GET /v1/audit` returns a
+  structured `503 persistence_unavailable`.
+- **Approval state machine** is validated in the facade
+  (pending→approved/rejected/expired/invalidated; approved→expired/invalidated;
+  terminal states final) with an optimistic status guard in the backend, so
+  concurrent/duplicate transitions cannot silently overwrite decisions.
+- **Bounded queries:** statement timeout (`RASP_DATABASE_STATEMENT_TIMEOUT_MS`,
+  default 5000 ms) turns a hung database into a denial, not a hung request.
+- Engine creation is lazy, so importing the app or building it does not require
+  a reachable database; any action that needs persistence then fails closed.
 
 ## 6. Failure behavior
 
@@ -114,6 +144,10 @@ events are lost on restart (documented in LIMITATIONS.md).**
 | Oversized request body | 413 before application code |
 | Missing principal headers | zero-permission principal → sensitive actions denied |
 | Step budget exceeded | safe fallback text, no further tool calls |
+| Database down / write fails (mutating tool) | DENY (`persistence_error`) before handler |
+| Approval record cannot be persisted | DENY (`persistence_error`); no pending record |
+| Audit write fails after a read-only action | completes with `audit_persistence_failed` flag |
+| `GET /v1/audit` storage outage | structured 503 `persistence_unavailable` |
 
 ## 7. Key modules
 
@@ -131,7 +165,8 @@ events are lost on restart (documented in LIMITATIONS.md).**
 | `policy/engine.py` | deterministic evaluation, documented precedence |
 | `executor/executor.py` | the trusted execution boundary |
 | `gateway/lifecycle.py` | chat loop, step budget, output gateway |
-| `approvals/store.py` | pending records, binding, expiry |
-| `audit/service.py` | pseudonymized, content-free events |
+| `approvals/store.py` | approval facade: state machine, binding, expiry |
+| `audit/service.py` | pseudonymized, content-free events (backend-agnostic) |
+| `persistence/` | SQLAlchemy models, async engine, PostgreSQL audit/approval/policy repositories |
 | `privacy/redaction.py` | secret-shape redaction, truncation |
 | `risk/signals.py` | injection indicators (defense in depth) |

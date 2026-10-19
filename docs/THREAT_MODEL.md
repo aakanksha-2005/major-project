@@ -1,9 +1,9 @@
 # RASP — Threat Model
 
-**Status:** Milestone 1 · **Not production-certified**
-Scope: the Milestone 1 prototype (mock model, synthetic tools, in-memory
-stores, development identity). Later milestones change the surface and
-require this document to be updated.
+**Status:** Milestone 2 · **Not production-certified**
+Scope: the Milestone 2 prototype (mock model, synthetic tools, PostgreSQL
+persistence with explicit `in_memory` opt-out, development identity). Later
+milestones change the surface and require this document to be updated.
 
 ## 1. Assets
 
@@ -39,7 +39,7 @@ claims in text are meaningless.
 
 ## 4. Attack surface and mitigations
 
-| # | Attack | Mitigation (implemented in M1) | Residual risk |
+| # | Attack | Mitigation (implemented) | Residual risk |
 |---|---|---|---|
 | 1 | Unknown tool identifier (`exfiltrate_credentials`, dotted paths, case/whitespace variants) | Registry default-deny; exact-key lookup (tested) | none known at this layer |
 | 2 | Disabled tool executed despite permissions | `enabled: false` deny step before execution (tested) | none known |
@@ -55,10 +55,12 @@ claims in text are meaningless.
 | 12 | Unsafe output (schema-violating, secret-shaped) | Output schema validation + pattern redaction (tested) | **pattern detection incomplete** |
 | 13 | Unbounded tool loops | `max_agent_steps` budget (tested) | per-request budgets only |
 | 14 | Oversized payloads (DoS) | Body-size middleware → 413 (tested) | rate limiting not yet implemented |
-| 15 | Audit access by unauthorized/scoped-out callers | `audit:read` gate; own-scope filtering; `audit:admin` for all (tested) | in-memory store, no integrity signing |
+| 15 | Audit access by unauthorized/scoped-out callers | `audit:read` gate; own-scope filtering; `audit:admin` for all (tested) | durable store, but no integrity signing; DB credentials can alter rows |
 | 16 | Prompt injection (direct/indirect) | Trust labels; flags; authorization independent of content (tested) | **detection is best-effort**; enforcement must not rely on it — and does not |
 | 17 | Secrets in logs/events | Audit schema structurally has no content fields (tested) | app-level logging not yet centralized/redaction-tested |
 | 18 | Policy weakening at load | Defaults hard-wired `deny` (Literal types); critical+enabled requires approval; registry/policy consistency check (tested) | file access control is infra's job |
+| 19 | Database unavailable / write fails → action executes unlogged | Mutating tools deny (`persistence_error`) before the handler; approvals that cannot persist deny (tested without and with a real DB) | read-only post-hoc audit fallback is flagged, not blocked |
+| 20 | Concurrent duplicate approvals / state rollback | Partial unique index (one pending per exact action), optimistic expected-status guard, validated state machine (tested on PostgreSQL) | reviewer authorization still M3 |
 
 ## 5. Explicit non-claims
 
@@ -66,7 +68,7 @@ RASP does **not** claim to:
 
 - detect all prompt injections or jailbreaks;
 - stop a compromised application process from calling handlers directly;
-- provide tamper-proof audit (no signatures/chain in M1);
+- provide tamper-proof audit (no signatures/chain in M2);
 - replace the target system's own authorization;
 - provide production authentication (M1 headers are development-only);
 - be bias-free, jailbreak-proof, or certified.
@@ -78,15 +80,17 @@ RASP does **not** claim to:
    (Milestone 3+ hardening).
 3. Registered handlers are correct, reviewed, non-networked demo code.
 4. Synthetic data only until the pilot governance gate (Phase 5/6).
-5. One deployment instance per trust domain until PostgreSQL (M2) and
-   multi-instance state are addressed.
+5. One application instance is expected per deployment for policy caching;
+   shared PostgreSQL state is durable, but no multi-instance coordination or
+   migration orchestration is provided.
 
 ## 7. Residual risks (documented, unresolved in M1)
 
 | Risk | Severity | Disposition |
 |---|---|---|
 | Header-based identity is forgeable by anyone with network access | **high** (if exposed) | acceptable for local dev only; M3 auth design required before any shared deployment |
-| In-memory audit/approvals lost on restart | medium | M2 (Postgres) + M3 (persisted approvals) |
+| Database outage | medium | mutating actions/approvals fail closed; read-only actions flagged; `/v1/audit` 503; recovery is a manual dump/restore runbook (`docs/DEPLOYMENT.md`) |
+| Audit rows are mutable by anyone with DB credentials | medium | no signing/append-only control yet; documented |
 | Pattern-based redaction misses novel secret formats | medium | documented limitation; defense-in-depth layer only |
 | No rate limiting / concurrency controls | medium | pre-deployment requirement |
 | Injection indicators may false-positive on coursework | low | flags are advisory; authorization unaffected |

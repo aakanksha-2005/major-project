@@ -77,33 +77,33 @@ def _event(request_id: str, principal_ref: str) -> AuditEvent:
     )
 
 
-def test_query_filters_by_request_and_principal():
+async def test_query_filters_by_request_and_principal():
     service = AuditService(Settings())
-    service.record(_event("req-a", "pid_one"))
-    service.record(_event("req-b", "pid_two"))
-    assert len(service.query(request_id="req-a")) == 1
-    only_one = service.query(principal_refs=["pid_one"])
+    await service.record(_event("req-a", "pid_one"))
+    await service.record(_event("req-b", "pid_two"))
+    assert len(await service.query(request_id="req-a")) == 1
+    only_one = await service.query(principal_refs=["pid_one"])
     assert len(only_one) == 1
     assert only_one[0].request_id == "req-a"
-    assert len(service.query()) == 2
+    assert len(await service.query()) == 2
 
 
-def test_query_respects_limit_and_offset_newest_first():
+async def test_query_respects_limit_and_offset_newest_first():
     service = AuditService(Settings())
     for i in range(5):
-        service.record(_event(f"req-{i}", "pid_one"))
-    page = service.query(limit=2, offset=0)
+        await service.record(_event(f"req-{i}", "pid_one"))
+    page = await service.query(limit=2, offset=0)
     assert [e.request_id for e in page] == ["req-4", "req-3"]
-    page2 = service.query(limit=2, offset=2)
+    page2 = await service.query(limit=2, offset=2)
     assert [e.request_id for e in page2] == ["req-2", "req-1"]
 
 
-def test_buffer_is_bounded():
+async def test_buffer_is_bounded():
     settings = Settings(audit_buffer_size=16)
     service = AuditService(settings)
     for i in range(40):
-        service.record(_event(f"req-{i}", "pid_one"))
-    assert service.count() == 16
+        await service.record(_event(f"req-{i}", "pid_one"))
+    assert await service.count() == 16
 
 
 # --- redaction ------------------------------------------------------------------

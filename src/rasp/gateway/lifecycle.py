@@ -10,11 +10,16 @@ operation never grants blanket approval to later operations.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from rasp.audit.service import AuditService
 from rasp.auth.dev_identity import Principal
-from rasp.executor.executor import ControlledExecutor, decision_summary
+from rasp.executor.executor import (
+    AUDIT_PERSISTENCE_FLAG,
+    ControlledExecutor,
+    decision_summary,
+)
 from rasp.models.base import ModelAdapter
 from rasp.models.mock import build_system_policy_message, encode_tool_result_content
 from rasp.privacy.redaction import screen_text
@@ -25,6 +30,8 @@ from rasp.schemas.common import PROTOTYPE_NOTICE_SAFE, TrustCategory, new_id
 from rasp.schemas.model import ModelMessage, ModelOptions
 from rasp.schemas.policy import DecisionOutcome
 from rasp.settings import Settings
+
+logger = logging.getLogger("rasp.gateway")
 
 # Trusted, application-authored system policy text. Untrusted content never
 # modifies this message; it is prepended by the orchestrator, not the model.
@@ -68,7 +75,11 @@ class ChatOrchestrator:
         # Risk scan of the untrusted user text: supplementary signal only.
         user_risk = scan_text(request.message, TrustCategory.USER)
 
-        self._audit.record(
+        # Audit persistence is best-effort at the request level: a database
+        # outage must not crash a plain chat turn. Sensitive actions are
+        # gated inside the executor, which fails closed there.
+        runtime_flags: list[str] = []
+        await self._safe_record(
             AuditEvent(
                 request_id=request_id,
                 correlation_id=request_id,
@@ -76,7 +87,8 @@ class ChatOrchestrator:
                 principal_ref=principal_ref,
                 event_type=AuditEventType.REQUEST_RECEIVED,
                 security_flags=user_risk.flags,
-            )
+            ),
+            runtime_flags,
         )
 
         messages: list[ModelMessage] = [
@@ -113,6 +125,7 @@ class ChatOrchestrator:
                     risk_flags=user_risk.flags,
                 )
                 decisions.append(decision_summary(outcome.decision))
+                runtime_flags.extend(outcome.security_flags)
 
                 if outcome.approval_id:
                     approval_ids.append(outcome.approval_id)
@@ -145,8 +158,8 @@ class ChatOrchestrator:
         if screening.flags:
             screened_flags.extend(screening.flags)
 
-        security_flags = list(dict.fromkeys(user_risk.flags + screened_flags))
-        self._audit.record(
+        security_flags = list(dict.fromkeys(user_risk.flags + runtime_flags + screened_flags))
+        persisted = await self._safe_record(
             AuditEvent(
                 request_id=request_id,
                 correlation_id=request_id,
@@ -155,8 +168,11 @@ class ChatOrchestrator:
                 event_type=AuditEventType.RESPONSE_SCREENED,
                 security_flags=security_flags,
                 execution_status="redacted" if screening.redaction_count else "clean",
-            )
+            ),
+            security_flags,
         )
+        if not persisted and AUDIT_PERSISTENCE_FLAG not in security_flags:
+            security_flags.append(AUDIT_PERSISTENCE_FLAG)
 
         return ChatResponse(
             request_id=request_id,
@@ -168,6 +184,20 @@ class ChatOrchestrator:
             model_id=self._model.model_id,
             prototype_notice=PROTOTYPE_NOTICE_SAFE,
         )
+
+    async def _safe_record(self, event: AuditEvent, flags: list[str]) -> bool:
+        """Best-effort request-level audit write (see module docstring).
+
+        Failure is flagged for the client response instead of raising.
+        """
+        try:
+            await self._audit.record(event)
+            return True
+        except Exception:
+            logger.exception("audit persistence failed for %s", event.event_type.value)
+            if AUDIT_PERSISTENCE_FLAG not in flags:
+                flags.append(AUDIT_PERSISTENCE_FLAG)
+            return False
 
     def _tool_result_content(self, outcome) -> str:
         """Bounded, JSON-encoded tool result for the next model step."""

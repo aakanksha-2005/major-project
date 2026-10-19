@@ -37,6 +37,9 @@ class ReasonCode(StrEnum):
     APPROVAL_REQUIRED = "approval_required"
     APPROVAL_INVALID = "approval_invalid"
     POLICY_ERROR = "policy_error"
+    # Milestone 2: persistence unavailable — the executor fails closed for
+    # actions that cannot be durably audited first (mutating tools).
+    PERSISTENCE_ERROR = "persistence_error"
 
 
 class PolicyDecision(BaseModel):

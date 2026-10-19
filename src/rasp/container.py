@@ -15,6 +15,12 @@ from rasp.executor.executor import ControlledExecutor
 from rasp.gateway.lifecycle import ChatOrchestrator
 from rasp.models.base import ModelAdapter
 from rasp.models.mock import MockModelAdapter
+from rasp.persistence.db import Database
+from rasp.persistence.repositories import (
+    PolicyRepository,
+    PostgresApprovalStore,
+    PostgresAuditStore,
+)
 from rasp.policy.config import (
     PolicyConfig,
     load_policy_file,
@@ -45,6 +51,14 @@ class Container:
     model: ModelAdapter
     executor: ControlledExecutor
     orchestrator: ChatOrchestrator
+    # Database is None for the explicitly configured in-memory mode.
+    db: Database | None = None
+    policy_repository: PolicyRepository | None = None
+
+    async def close(self) -> None:
+        """Dispose pooled connections (used by tests and shutdown)."""
+        if self.db is not None:
+            await self.db.dispose()
 
 
 def resolve_policy_path(settings: Settings) -> Path:
@@ -224,6 +238,41 @@ def build_model_adapter(settings: Settings) -> ModelAdapter:
     )
 
 
+def build_persistence(
+    settings: Settings, policy_config: PolicyConfig
+) -> tuple[
+    AuditService,
+    ApprovalStore,
+    Database | None,
+    PolicyRepository | None,
+]:
+    """Wire the configured persistence backend.
+
+    - `postgres` (default): PostgreSQL stores; database errors surface from
+      store calls and the executor fails closed for sensitive actions.
+    - `in_memory`: explicit opt-out for demos and the documented M1 test
+      strategy (no database involved).
+    - Any other value refuses startup (no silent fallback).
+    """
+    if settings.persistence == "in_memory":
+        audit = AuditService(settings)
+        approvals = ApprovalStore(ttl_seconds=settings.approval_ttl_seconds)
+        return audit, approvals, None, None
+    if settings.persistence == "postgres":
+        db = Database(settings)
+        policy_repo = PolicyRepository(db, policy_config)
+        audit = AuditService(settings, store=PostgresAuditStore(db, policy_repo))
+        approvals = ApprovalStore(
+            ttl_seconds=settings.approval_ttl_seconds,
+            backend=PostgresApprovalStore(db, policy_repo),
+        )
+        return audit, approvals, db, policy_repo
+    raise ValueError(
+        f"unknown persistence mode '{settings.persistence}'; "
+        "expected 'postgres' or 'in_memory' (no silent fallback)"
+    )
+
+
 def build_container(settings: Settings) -> Container:
     policy_path = resolve_policy_path(settings)
     policy_config = load_policy_file(policy_path)
@@ -236,8 +285,7 @@ def build_container(settings: Settings) -> Container:
     validate_policy_registry_consistency(policy_config, registry.list())
 
     engine = PolicyEngine(policy_config, registry)
-    approvals = ApprovalStore(ttl_seconds=settings.approval_ttl_seconds)
-    audit = AuditService(settings)
+    audit, approvals, db, policy_repo = build_persistence(settings, policy_config)
     model = build_model_adapter(settings)
     executor = ControlledExecutor(
         registry=registry, engine=engine, approvals=approvals, audit=audit
@@ -253,4 +301,6 @@ def build_container(settings: Settings) -> Container:
         model=model,
         executor=executor,
         orchestrator=orchestrator,
+        db=db,
+        policy_repository=policy_repo,
     )

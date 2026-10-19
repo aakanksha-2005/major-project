@@ -52,6 +52,9 @@ class ExecutionOutcome(BaseModel):
     decision: PolicyDecision
     result: ExecutionResult | None = None
     approval_id: str | None = None
+    # Enforcement-time flags (e.g. `audit_persistence_failed` for the
+    # documented read-only fallback). Merged into chat responses.
+    security_flags: list[str] = Field(default_factory=list)
 
     @property
     def allowed(self) -> bool:

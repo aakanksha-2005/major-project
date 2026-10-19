@@ -10,12 +10,24 @@ Order of operations (per spec §8):
   3. Validate arguments             8. Execute registered handler only
   4. Fresh policy evaluation        9. Validate + screen result
   5. Deny / require approval       10. Emit audit events
+
+Milestone 2 persistence rules (fail closed):
+  - A MUTATING tool must be durably audited (pre-execution authorization
+    event) before its handler runs. If persistence is unavailable the
+    action is denied with reason `persistence_error` — the handler is
+    never reached.
+  - Approval creation requires persistence; failure denies with
+    `persistence_error`.
+  - READ-ONLY tools may execute when post-hoc audit persistence fails
+    (documented fallback, docs/LIMITATIONS.md); the outcome carries an
+    `audit_persistence_failed` security flag.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -38,6 +50,10 @@ from rasp.schemas.execution import (
 from rasp.schemas.model import ToolProposal
 from rasp.schemas.policy import DecisionOutcome, PolicyDecision, ReasonCode
 from rasp.tools.registry import ToolRegistry
+
+logger = logging.getLogger("rasp.executor")
+
+AUDIT_PERSISTENCE_FLAG = "audit_persistence_failed"
 
 
 class ControlledExecutor:
@@ -85,7 +101,7 @@ class ControlledExecutor:
                 policy_version=self._engine.policy_version,
                 tool_id=proposal.tool_id,
             )
-            self._emit_decision(
+            await self._emit_decision(
                 decision,
                 principal_ref=principal_ref,
                 request_id=request_id,
@@ -101,11 +117,12 @@ class ControlledExecutor:
                     status=ExecutionStatus.BLOCKED,
                     error_category=ReasonCode.POLICY_ERROR.value,
                 ),
+                security_flags=flags,
             )
 
         # 5a. Deny: record and return — the handler is never invoked.
         if decision.outcome == DecisionOutcome.DENY:
-            self._emit_decision(
+            await self._emit_decision(
                 decision,
                 principal_ref=principal_ref,
                 request_id=request_id,
@@ -120,9 +137,12 @@ class ControlledExecutor:
                     status=ExecutionStatus.BLOCKED,
                     error_category=decision.reason_code.value,
                 ),
+                security_flags=flags,
             )
 
-        # 5b. Approval required: create pending action — no execution.
+        # 5b. Approval required: create a persistent pending record. If the
+        # record cannot be persisted, fail closed (deny) — an unpersistable
+        # approval could never be honored later anyway.
         if decision.outcome == DecisionOutcome.REQUIRE_APPROVAL:
             digest = compute_action_digest(
                 proposal.tool_id,
@@ -130,15 +150,29 @@ class ControlledExecutor:
                 principal.principal_id if principal else "unauthenticated",
                 decision.policy_version,
             )
-            approval = self._approvals.create_pending(
-                request_id=request_id,
-                principal_ref=principal_ref,
-                tool_id=proposal.tool_id,
-                action_digest=digest,
-                policy_version=decision.policy_version,
-            )
+            try:
+                approval = await self._approvals.create_pending(
+                    request_id=request_id,
+                    principal_ref=principal_ref,
+                    tool_id=proposal.tool_id,
+                    action_digest=digest,
+                    policy_version=decision.policy_version,
+                )
+            except Exception:
+                logger.exception(
+                    "approval persistence failed for %s — failing closed",
+                    proposal.tool_id,
+                )
+                return await self._deny_persistence(
+                    proposal,
+                    policy_version=decision.policy_version,
+                    principal_ref=principal_ref,
+                    request_id=request_id,
+                    correlation_id=correlation,
+                    flags=flags,
+                )
             decision = decision.model_copy(update={"approval_id": approval.approval_id})
-            self._emit_decision(
+            await self._emit_decision(
                 decision,
                 principal_ref=principal_ref,
                 request_id=request_id,
@@ -147,7 +181,7 @@ class ControlledExecutor:
                 approval_id=approval.approval_id,
                 flags=flags,
             )
-            self._audit.record(
+            await self._safe_record(
                 AuditEvent(
                     request_id=request_id,
                     correlation_id=correlation,
@@ -162,7 +196,8 @@ class ControlledExecutor:
                     execution_status="pending_approval",
                     action_digest=digest,
                     security_flags=flags,
-                )
+                ),
+                flags=flags,
             )
             return ExecutionOutcome(
                 decision=decision,
@@ -171,10 +206,41 @@ class ControlledExecutor:
                     status=ExecutionStatus.PENDING_APPROVAL,
                 ),
                 approval_id=approval.approval_id,
+                security_flags=flags,
             )
 
-        # 6-8. ALLOW / ALLOW_WITH_CONSTRAINTS: execute the registered handler.
+        # 6. ALLOW / ALLOW_WITH_CONSTRAINTS: reach the registered handler.
         definition = self._registry.require(proposal.tool_id)
+
+        # Mutating tools must be durably audited BEFORE execution. If the
+        # authorization event cannot be written, the handler never runs.
+        if not definition.read_only:
+            persisted = await self._safe_record(
+                AuditEvent(
+                    request_id=request_id,
+                    correlation_id=correlation,
+                    timestamp=datetime.now(UTC),
+                    principal_ref=principal_ref,
+                    event_type=AuditEventType.TOOL_EXECUTION,
+                    tool_id=proposal.tool_id,
+                    policy_version=decision.policy_version,
+                    decision=decision.outcome,
+                    reason_code=decision.reason_code,
+                    execution_status="authorized",
+                    security_flags=flags,
+                ),
+                flags=flags,
+            )
+            if not persisted:
+                return await self._deny_persistence(
+                    proposal,
+                    policy_version=decision.policy_version,
+                    principal_ref=principal_ref,
+                    request_id=request_id,
+                    correlation_id=correlation,
+                    flags=flags,
+                )
+
         started = time.perf_counter()
         status = ExecutionStatus.EXECUTED
         error_category: str | None = None
@@ -234,13 +300,15 @@ class ControlledExecutor:
                 duration_ms=duration_ms,
             )
 
-        # 10. Audit: decision event + execution event.
+        # 10. Audit: decision event + execution event. Persistence failures
+        # here are post-hoc (the action already ran); they surface as the
+        # documented `audit_persistence_failed` flag.
         audit_status = {
             ExecutionStatus.EXECUTED: "executed",
             ExecutionStatus.FAILED: "failed",
             ExecutionStatus.TIMEOUT: "timeout",
         }[status]
-        self._emit_decision(
+        await self._emit_decision(
             decision,
             principal_ref=principal_ref,
             request_id=request_id,
@@ -253,7 +321,7 @@ class ControlledExecutor:
         if status != ExecutionStatus.EXECUTED:
             # Execution attempts that failed/timed out also get an execution
             # event so reviewers see the attempt outcome with duration.
-            self._audit.record(
+            await self._safe_record(
                 AuditEvent(
                     request_id=request_id,
                     correlation_id=correlation,
@@ -268,16 +336,71 @@ class ControlledExecutor:
                     duration_ms=duration_ms,
                     error_category=error_category,
                     security_flags=flags,
-                )
+                ),
+                flags=flags,
             )
 
         return ExecutionOutcome(
             decision=decision,
             result=result,
             approval_id=decision.approval_id,
+            security_flags=flags,
         )
 
-    def _emit_decision(
+    async def _deny_persistence(
+        self,
+        proposal: ToolProposal,
+        *,
+        policy_version: str,
+        principal_ref: str,
+        request_id: str,
+        correlation_id: str,
+        flags: list[str],
+    ) -> ExecutionOutcome:
+        """Fail closed when the action cannot be durably recorded first."""
+        decision = PolicyDecision(
+            outcome=DecisionOutcome.DENY,
+            reason_code=ReasonCode.PERSISTENCE_ERROR,
+            message=(
+                "Persistence is unavailable; the action was denied. "
+                "Try again after the service is restored."
+            ),
+            policy_version=policy_version,
+            tool_id=proposal.tool_id,
+        )
+        await self._emit_decision(
+            decision,
+            principal_ref=principal_ref,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            execution_status="not_executed",
+            flags=flags,
+        )
+        return ExecutionOutcome(
+            decision=decision,
+            result=ExecutionResult(
+                tool_id=proposal.tool_id,
+                status=ExecutionStatus.BLOCKED,
+                error_category=ReasonCode.PERSISTENCE_ERROR.value,
+            ),
+            security_flags=flags,
+        )
+
+    async def _safe_record(self, event: AuditEvent, *, flags: list[str]) -> bool:
+        """Record an event; never let persistence failure crash enforcement.
+
+        Returns False when the write failed (also flagging the outcome).
+        """
+        try:
+            await self._audit.record(event)
+            return True
+        except Exception:
+            logger.exception("audit persistence failed for %s", event.event_type.value)
+            if AUDIT_PERSISTENCE_FLAG not in flags:
+                flags.append(AUDIT_PERSISTENCE_FLAG)
+            return False
+
+    async def _emit_decision(
         self,
         decision: PolicyDecision,
         *,
@@ -290,7 +413,7 @@ class ControlledExecutor:
         approval_id: str | None = None,
         flags: list[str] | None = None,
     ) -> None:
-        self._audit.record(
+        await self._safe_record(
             AuditEvent(
                 request_id=request_id,
                 correlation_id=correlation_id,
@@ -306,7 +429,8 @@ class ControlledExecutor:
                 duration_ms=duration_ms,
                 error_category=error_category,
                 security_flags=list(flags or []),
-            )
+            ),
+            flags=flags if flags is not None else [],
         )
 
 

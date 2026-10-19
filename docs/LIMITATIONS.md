@@ -1,4 +1,4 @@
-# RASP — Known Limitations (v0.1, Milestone 1)
+# RASP — Known Limitations (v0.1, Milestone 2)
 
 Honest disclosure of what is and is not covered. Updated per milestone.
 
@@ -15,8 +15,11 @@ Honest disclosure of what is and is not covered. Updated per milestone.
 | Audit structural privacy, pseudonymization, scoping | `tests/unit/test_audit_privacy.py`, `tests/integration/test_audit_api.py` |
 | Chat lifecycle, step budget, 413 size limit | `tests/integration/test_api.py`, adversarial suite |
 | Direct/indirect injection, impersonation, executor-bypass probes | `tests/adversarial/` |
+| PostgreSQL migrations, restart durability, approval transitions/idempotency, content-free columns | `tests/postgres/test_pg_lifecycle.py` |
+| Database failure denies mutating actions before the handler; read-only fallback is flagged; `/v1/audit` 503 | `tests/unit/test_persistence_fail_closed.py`, `tests/integration/test_db_unavailable.py` |
 
-Current run: **144 passed** (`uv run pytest`), lint and format clean.
+Current run: **173 passed, 0 skipped** with PostgreSQL running
+(163 of them need no database). Lint and format clean.
 
 ## 2. What is NOT covered (untested attack classes)
 
@@ -30,9 +33,12 @@ Current run: **144 passed** (`uv run pytest`), lint and format clean.
   local-model behavior arrives in Milestone 4.
 - Rate limiting and fair-use abuse (not implemented yet).
 - Audit tamper resistance: no signatures, hash chain, or external
-  immutability. An attacker with process access can alter the in-memory
-  buffer.
-- Postgres failure modes (no database in M1).
+  immutability. Events are durable in PostgreSQL, but anyone with database
+  credentials can alter or delete them.
+- PostgreSQL operational failure modes beyond the tested ones (disk
+  exhaustion, replication lag, corruption, backup/restore drills): RASP
+  fails closed on failed writes, but recovery is a manual, untested
+  runbook-level procedure.
 - Localization/fairness across languages and dialects (no multilingual
   evaluation has been performed).
 
@@ -55,8 +61,11 @@ Current run: **144 passed** (`uv run pytest`), lint and format clean.
   headers are forgeable by anyone who can reach the port. Never expose
   this build beyond localhost. Production authentication is a Milestone 3
   prerequisite.
-- **In-memory state:** audit events and pending approvals are lost on
-  restart. PostgreSQL persistence is Milestone 2.
+- **Persistence is durable but local:** audit events, approvals, and policy
+  metadata persist in PostgreSQL across restarts. `RASP_PERSISTENCE=in_memory`
+  is an explicit opt-out that loses everything on restart. The shipped setup
+  is a single unencrypted development instance (documented credentials, no
+  TLS) — not a production database deployment.
 - **Approval workflow is partial:** pending creation + digest binding +
   expiry exist and are tested; reviewer decision endpoints and reviewer
   authorization are Milestone 3. Until then, no approved state can be
@@ -81,5 +90,6 @@ Current run: **144 passed** (`uv run pytest`), lint and format clean.
 - No live public-service systems, no real personal records, no production
   credentials — and none are required to run the test suite.
 - Any use beyond localhost requires: real authentication (M3),
-  persistent audit (M2), an adversarial evaluation report (M5), and an
-  independent security/privacy review.
+  a hardened (encrypted, backed-up, access-controlled) database deployment,
+  an adversarial evaluation report (M5), and an independent
+  security/privacy review.

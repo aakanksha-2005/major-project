@@ -12,6 +12,12 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "pyyaml>=6.0.2",
     "jsonschema>=4.23.0",
+    # Milestone 2: PostgreSQL is the target persistence layer.
+    # asyncpg: works with uvicorn's default event loop on every platform
+    # (psycopg's async mode refuses Windows' ProactorEventLoop).
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.14.0",
+    "asyncpg>=0.30.0",
 ]
 
 [dependency-groups]
@@ -33,6 +39,13 @@ packages = ["src/rasp"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+# -m "not postgres" runs the full suite without PostgreSQL (documented
+# strategy: M1 mock-model tests never need the database; postgres-marked
+# tests use an isolated *_test database and skip explicitly when the
+# server is unreachable — never silently substituting SQLite).
+markers = [
+    "postgres: requires a reachable PostgreSQL test database (skips with an explicit reason when unavailable)",
+]
 
 [tool.ruff]
 line-length = 100
