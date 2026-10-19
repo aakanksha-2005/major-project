@@ -1,0 +1,64 @@
+# RASP example policy configuration (Milestone 1).
+#
+# This file is validated at startup. The application REFUSES TO START when:
+#   - any default-deny category is weakened (they are hard-wired to "deny"),
+#   - a critical-risk tool is enabled without required approval,
+#   - entries conflict with registered tool metadata (permission/risk/approval).
+#
+# This is an illustrative prototype policy, not a complete production
+# authorization system. See docs/POLICY_GUIDE.md (planned) and
+# docs/THREAT_MODEL.md.
+
+version: "1.0"
+
+defaults:
+  unknown_tool: deny
+  authorization_failure: deny
+  policy_error: deny
+  sensitive_action_without_approval: deny
+
+tools:
+  system_status:
+    enabled: true
+    risk: low
+    permission: system:status
+    requires_approval: false
+
+  document_search:
+    enabled: true
+    risk: low
+    permission: documents:read
+    requires_approval: false
+    constraints:
+      # Enforced argument cap: requests above 5 are denied (constraint_violation).
+      argument_caps:
+        max_results: 5
+      # Enforced output cap: at most 5 documents leave the executor.
+      output_max_items: 5
+      redact: false
+
+  application_preview:
+    enabled: true
+    risk: medium
+    permission: applications:preview
+    requires_approval: false
+
+  # Enabled but gated on human approval: demonstrates REQUIRE_APPROVAL.
+  publish_announcement:
+    enabled: true
+    risk: high
+    permission: announcements:publish
+    requires_approval: true
+
+  # Disabled tools remain unavailable even when the model requests them.
+  application_submit:
+    enabled: false
+    risk: high
+    permission: applications:submit
+    requires_approval: true
+
+  record_delete:
+    enabled: false
+    risk: critical
+    permission: records:delete
+    requires_approval: true

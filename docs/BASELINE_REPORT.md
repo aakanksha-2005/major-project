@@ -1,0 +1,102 @@
+# RASP — Baseline Inspection Report (Milestone 0)
+
+**Date:** 2026-10-19
+**Inspector:** KYRA (coding agent)
+**Scope:** Repository `C:\Users\srira\OneDrive\Desktop\Projects\RASP` and remote `github.com/aakanksha-2005/major-project`
+
+## 1. Existing architecture and stack
+
+### Local working directory (before this work)
+
+- **Empty directory.** No files, no source code, no dependency manifests,
+  no tests, no configuration, no git repository.
+- There was no existing architecture to preserve or reuse.
+
+### Remote repository (`aakanksha-2005/major-project`)
+
+- Public GitHub repository, **1 commit**, containing only an
+  auto-generated placeholder `README.md` (`# major-project`).
+- No description, topics, branches other than `main`, or other content.
+
+## 2. What was already implemented
+
+Nothing. This is a greenfield build. The original placeholder README was
+preserved in git history (commit `18e68f3`, `Initial commit`) and replaced
+with the project README as authorized by the project owner.
+
+## 3. Environment inventory (execution environment)
+
+| Tool | Version | Notes |
+|---|---|---|
+| Python | 3.14.6 | `requires-python >= 3.12` satisfied |
+| uv | 0.12.5 | used for environment + dependency sync |
+| git | 2.55.0 | global identity `dilleshwar-17` |
+| Docker | 29.6.2 | available for Milestone 2 PostgreSQL |
+| psql | not installed | PostgreSQL via Docker in M2 |
+| GitHub CLI (`gh`) | not installed | collaborator management not automatable here |
+
+Resolved dependency lock: `uv.lock` (fastapi/starlette/pydantic 2.x,
+jsonschema, pyyaml, pytest 9.x, httpx, ruff). All resolved and installable
+on Python 3.14.
+
+## 4. Tests that pass or fail
+
+Baseline after Milestone 0 + 1 implementation:
+
+```
+144 passed  (uv run pytest)
+ruff check src tests   -> All checks passed!
+ruff format --check    -> 58 files already formatted
+```
+
+Live verification (real HTTP against `uvicorn rasp.main:app`):
+
+- `GET /v1/health` → 200 minimal payload
+- `POST /v1/chat` → 200 deterministic mock reply
+- `POST /v1/tools/execute` (`document_search`) → 200 `allow_with_constraints`
+- `POST /v1/tools/execute` (`record_delete`) → **403 `tool_disabled`**
+- `POST /v1/tools/execute` (`publish_announcement`) → **202 pending approval**
+
+## 5. Missing prerequisites
+
+- **PostgreSQL** not running/installed locally (Docker available) —
+  Milestone 2 target, intentionally not required by Milestone 1.
+- **GitHub collaborator access**: `dilleshwar-17` is not yet a contributor
+  on `aakanksha-2005/major-project`; push requires the owner's invitation
+  (deferred by decision of the project owner).
+- No local-model runtime installed — Milestone 4 (mock adapter only now).
+
+## 6. Security concerns discovered
+
+1. **No prior code existed**, so no inherited vulnerabilities; the threat
+   model is documented fresh in `docs/THREAT_MODEL.md`.
+2. Residual risks in this prototype are documented in `docs/LIMITATIONS.md`
+   (development header-based identity, pattern-based detection limits,
+   in-memory stores).
+
+## 7. Files created or modified
+
+See README and `docs/ARCHITECTURE.md`. Summary:
+
+- Project scaffolding: `pyproject.toml`, `uv.lock`, `.gitignore`, `.env.example`
+- Source: `src/rasp/**` (gateway, models, tools, policy, risk, approvals,
+  executor, audit, privacy, auth, api, schemas, container, main, settings)
+- Policy: `config/policies.example.yaml`
+- Tests: `tests/{unit,integration,adversarial}/**` (144 tests)
+- Docs: `docs/{BASELINE_REPORT,ARCHITECTURE,THREAT_MODEL,LIMITATIONS,DEVELOPMENT}.md`,
+  `README.md` (replaces placeholder), `scripts/*`
+
+## 8. Proposed phased implementation plan
+
+| Phase | Content | Status |
+|---|---|---|
+| M0 | Repository inspection, baseline, architecture, threat model | **done** |
+| M1 | FastAPI + mock model + registry + policy engine + executor + audit + tests | **done** |
+| M2 | PostgreSQL persistence (SQLAlchemy, Alembic, repositories) | next |
+| M3 | Approval lifecycle endpoints, reviewer authz, idempotency, structured logging | planned |
+| M4 | Local LLM adapter behind the same model interface | planned |
+| M5 | Adversarial evaluation report with metrics | planned |
+| M6 | Controlled pilot preparation | planned |
+
+**Constraint honored:** no live systems, real personal data, or production
+credentials were touched at any point.
