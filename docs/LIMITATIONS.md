@@ -1,4 +1,4 @@
-# RASP — Known Limitations (v0.1, Milestone 5)
+# RASP — Known Limitations (v0.1, Milestone 6)
 
 Honest disclosure of what is and is not covered. Updated per milestone.
 
@@ -25,8 +25,9 @@ Honest disclosure of what is and is not covered. Updated per milestone.
 | PostgreSQL migrations (head `0002_approval_consumed`), restart durability of consumed approvals, durable decision audit events, race-safe claim, approval transitions/idempotency, content-free columns | `tests/postgres/test_pg_lifecycle.py` |
 | Database failure denies mutating actions before the handler; approval lookup/claim failures deny; read-only fallback is flagged; `/v1/audit` 503 | `tests/unit/test_persistence_fail_closed.py`, `tests/integration/test_db_unavailable.py` |
 | Adversarial evaluation harness: corpus runs the real pipeline, scores prevention/containment, regenerates the committed report, and the tester itself is tested (broken cases must fail) | `tests/evaluation/test_evaluation_harness.py`, `docs/ADVERSARIAL_EVALUATION.md` |
+| Controlled-pilot readiness gate: unknown mode refuses startup; missing/unknown acknowledgement id refuses startup; complete acknowledgements enable controlled mode; pilot mode grants no extra authority and does not leak via `/v1/health` | `tests/unit/test_pilot_readiness.py` |
 
-Current run: **289 passed, 0 skipped** with PostgreSQL running (275 of them
+Current run: **303 passed, 0 skipped** with PostgreSQL running (289 of them
 need no database; the 14 `postgres`-marked tests skip with an explicit reason
 when it is not). Lint and format clean.
 
@@ -104,6 +105,13 @@ contains a declared attack; see §2 for what it does not measure.
   `ollama` (Ollama native API). Any other provider refuses startup. The local
   adapters are tested offline (injected transport) and fail closed on provider
   errors; no cloud/hosted provider is implemented or required.
+- **The M6 pilot gate records acceptance, it does not resolve gaps.** Setting
+  `RASP_PILOT_MODE=controlled` and acknowledging every documented gap in
+  `RASP_PILOT_ACKNOWLEDGED_GAPS` is required before a controlled pilot, and an
+  unknown mode or unknown/missing acknowledgement refuses startup. But the gate
+  **cannot verify** real authentication, encryption, backups, or that the data
+  is synthetic — those remain human responsibilities
+  (`docs/PILOT_READINESS.md`, `docs/GOVERNANCE.md`).
 - **Single process, no rate limiting.** Do not deploy publicly.
 - **Policy file** is read at startup only; changes require restart.
 
@@ -127,3 +135,6 @@ contains a declared attack; see §2 for what it does not measure.
   a *live*, comparative model-safety evaluation (the M5 harness covers
   RASP enforcement, not model behavior), and an independent
   security/privacy review.
+- A controlled, synthetic-data-only pilot is permitted **only** after passing
+  the M6 gate and its hard prerequisites (`docs/PILOT_READINESS.md`); passing
+  the gate is not a certification and does not enable real-data use.

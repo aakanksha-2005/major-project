@@ -2,7 +2,7 @@
 
 **Runtime security and authorization layer for LLM applications and tool-using AI agents.**
 
-> **Status: experimental prototype (v0.1.0, Milestone 3) — not production-certified.**
+> **Status: experimental prototype (v0.1.0, Milestone 6) — not production-certified.**
 > RASP is not a firewall replacement, a truth detector, or a guarantee against
 > prompt injection. See [Known Limitations](docs/LIMITATIONS.md) before relying
 > on any control described here.
@@ -30,7 +30,7 @@ approvals, and risk scores cannot override application-enforced permissions.
 | M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | ✅ done |
 | M4 | Local LLM adapter (OpenAI-compatible + Ollama native) | ✅ done |
 | M5 | Adversarial evaluation report with metrics | ✅ done |
-| M6 | Controlled pilot preparation | planned |
+| M6 | Controlled pilot preparation (governance docs + machine-checked gate) | ✅ done |
 
 **Implemented now:** deterministic mock model, **local LLM adapters
 (OpenAI-compatible and Ollama-native, no cloud credentials)**, 6 synthetic
@@ -45,11 +45,14 @@ separation of duties and scoped read access, idempotent decisions, structured
 JSON logging with request-id correlation, body-size limits, development header
 identity, REST API, **a deterministic offline adversarial evaluation harness
 with a generated report ([docs/ADVERSARIAL_EVALUATION.md](docs/ADVERSARIAL_EVALUATION.md))**,
-and **289 automated tests** (including 14 that run against a real PostgreSQL
-instance).
+**a machine-checked controlled-pilot readiness gate
+([docs/PILOT_READINESS.md](docs/PILOT_READINESS.md), [docs/GOVERNANCE.md](docs/GOVERNANCE.md),
+[docs/PILOT_PLAN.md](docs/PILOT_PLAN.md))**, and **303 automated tests**
+(including 14 that run against a real PostgreSQL instance).
 
-**Planned (not implemented):** rate limiting, real authentication, a
-comparative harness that measures real models' safety behavior.
+**Planned (not implemented):** rate limiting, real authentication,
+multi-instance operation, and a comparative harness that measures real
+models' safety behavior.
 
 ## 3. Architecture and request lifecycle
 
@@ -87,7 +90,7 @@ Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## 5. Features: implemented vs planned
 
 See status table in §2. Every "implemented" claim is covered by a test in
-`tests/` and was executed for this release (**289 passed**, including 14
+`tests/` and was executed for this release (**303 passed**, including 14
 PostgreSQL-backed tests; 0 skipped when the database is running, and the
 PostgreSQL tests **skip with an explicit reason** — never silently — when it
 is not). Model-adapter tests are fully offline (injected `httpx.MockTransport`);
@@ -136,7 +139,9 @@ Key settings: `RASP_POLICY_PATH`, `RASP_MODEL_PROVIDER` (`mock` default, or
 `RASP_PERSISTENCE` (`postgres` default, or explicit `in_memory`),
 `RASP_DATABASE_URL` (default `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp`),
 `RASP_LOG_LEVEL` / `RASP_LOG_FORMAT` (`json` default, or `text`; unknown
-values refuse startup).
+values refuse startup), `RASP_PILOT_MODE` (`off` default, or `controlled`)
+and `RASP_PILOT_ACKNOWLEDGED_GAPS` (required in controlled mode; unknown or
+missing ids refuse startup — see §13c).
 Full list: [.env.example](.env.example).
 
 ## 10. Database initialization and migrations
@@ -329,6 +334,35 @@ measures whether *RASP's enforcement layer* contains a declared attack; it does
 **not** measure a real LLM's propensity to attempt attacks, and a 100% rate is
 not a security proof (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
 
+## 13c. Controlled-pilot readiness gate (Milestone 6)
+
+RASP is a prototype. Before any *real* (supervised, synthetic-data-only) pilot,
+the operator must pass a **machine-checked gate** that records explicit
+acceptance of every documented gap:
+
+```powershell
+$env:RASP_PILOT_MODE = "controlled"
+$env:RASP_PILOT_ACKNOWLEDGED_GAPS = "dev_identity_not_production_auth,synthetic_data_only_until_auth_and_hardening," +
+  "audit_rows_mutable_by_db_credentials,no_log_signing_or_sink_control," +
+  "no_live_model_safety_evaluation,no_rate_limiting,single_instance_no_ha," +
+  "manual_db_recovery_runbook,human_oversight_required,no_fairness_or_accessibility_evaluation"
+uv run uvicorn rasp.main:app
+# → refuses to start unless EVERY id above is present and recognized
+```
+
+- **Opt-in & fail-closed:** `RASP_PILOT_MODE=off` (default) changes nothing; any
+  unknown mode, or an unknown/missing acknowledgement id, **refuses startup**
+  (same pattern as `RASP_MODEL_PROVIDER`/`RASP_PERSISTENCE`).
+- **No false authority:** passing the gate grants **no** extra permissions —
+  enforcement is identical (tested: a disabled tool stays denied in pilot
+  mode). It records that a named human accepted the documented gaps.
+- **Not a certification.** Real authentication, encryption/backups, and data
+  protection remain **hard prerequisites** the gate cannot verify — see
+  [docs/PILOT_READINESS.md](docs/PILOT_READINESS.md),
+  [docs/PILOT_PLAN.md](docs/PILOT_PLAN.md), and
+  [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
+- Tests: `tests/unit/test_pilot_readiness.py`.
+
 ## 14. Policy configuration
 
 Single YAML file, validated at startup; the app **refuses to start** on
@@ -355,8 +389,8 @@ permission → approval → allow. A deny at any step is final.
 ## 15. Running automated tests (verified)
 
 ```powershell
-uv run pytest                  # full suite: 289 passed (with PostgreSQL running)
-uv run pytest -m "not postgres"  # 275 passed / 14 skipped — no database required
+uv run pytest                  # full suite: 303 passed (with PostgreSQL running)
+uv run pytest -m "not postgres"  # 289 passed / 14 skipped — no database required
 uv run pytest -m postgres        # 14 passed against rasp_test
 uv run pytest tests/unit
 uv run pytest tests/integration
@@ -412,6 +446,10 @@ against any database name lacking "test".
   contained, not that RASP is un-breakable.
 - Fairness/accessibility evaluation across languages and user groups has
   **not** been performed yet and is required before any real-world pilot.
+- Any real pilot must pass the M6 gate and its hard prerequisites
+  ([docs/PILOT_READINESS.md](docs/PILOT_READINESS.md),
+  [docs/GOVERNANCE.md](docs/GOVERNANCE.md)); passing the gate is not a
+  certification.
 
 ## 18. Known limitations
 
@@ -421,7 +459,8 @@ pattern-based injection/secret detection is incomplete; no rate limiting; the
 local model adapter is fail-closed but real local-model safety behavior is not
 yet measured (the M5 harness scores *RASP's enforcement*, not a model's
 propensity to attack); approval reviewer authz rests on the same forgeable dev
-headers until production authentication lands; single-process prototype.
+headers until production authentication lands; single-process prototype. The
+M6 pilot gate **records** acceptance of these gaps but does not resolve them.
 Full list: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ## 19. Security vulnerability reporting

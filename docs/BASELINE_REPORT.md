@@ -41,11 +41,11 @@ on Python 3.14.
 
 ## 4. Tests that pass or fail
 
-Latest full run (Milestone 5):
+Latest full run (Milestone 6):
 
 ```
-289 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
-275 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
+303 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
+289 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
 ruff check src tests migrations   -> All checks passed!
 ```
 
@@ -92,9 +92,11 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 - Source: `src/rasp/**` (gateway, models, tools, policy, risk, approvals,
   executor, audit, privacy, auth, api, schemas, container, main, settings)
 - Policy: `config/policies.example.yaml`
-- Tests: `tests/{unit,integration,adversarial,postgres,evaluation}/**` (289 tests)
+- Tests: `tests/{unit,integration,adversarial,postgres,evaluation}/**` (303 tests)
 - Evaluation: `src/rasp/evaluation/**` (corpus, harness, report, runner),
   `docs/ADVERSARIAL_EVALUATION.md`, `docs/adversarial_evaluation.json`
+- Pilot governance: `src/rasp/pilot/**` (readiness gate),
+  `docs/{PILOT_READINESS,PILOT_PLAN,GOVERNANCE}.md`
 - Docs: `docs/{BASELINE_REPORT,ARCHITECTURE,THREAT_MODEL,LIMITATIONS,DEVELOPMENT}.md`,
   `README.md` (replaces placeholder), `scripts/*`
 
@@ -108,7 +110,7 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 | M3 | Approval lifecycle endpoints, reviewer authz, idempotency, structured logging | **done** |
 | M4 | Local LLM adapter (OpenAI-compatible + Ollama native, fail-closed) | **done** |
 | M5 | Adversarial evaluation report with metrics | **done** |
-| M6 | Controlled pilot preparation | planned |
+| M6 | Controlled pilot preparation (governance docs + machine-checked gate) | **done** |
 
 **Constraint honored:** no live systems, real personal data, or production
 credentials were touched at any point.

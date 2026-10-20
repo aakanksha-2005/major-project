@@ -57,11 +57,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_routes(app)
 
     logger.info(
-        "RASP started: policy_version=%s model_id=%s provider=%s prototype=true",
+        "RASP started: policy_version=%s model_id=%s provider=%s pilot_mode=%s prototype=true",
         container.policy_config.version,
         container.model.model_id,
         settings.model_provider,
+        container.pilot.mode,
     )
+    if container.pilot.enabled:
+        logger.warning(
+            "CONTROLLED PILOT MODE ENABLED: %d documented gaps acknowledged; "
+            "real authentication and hardening remain hard prerequisites "
+            "(see docs/PILOT_READINESS.md)",
+            len(container.pilot.acknowledged_gaps),
+        )
     return app
 
 

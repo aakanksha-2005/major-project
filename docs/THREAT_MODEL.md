@@ -1,11 +1,11 @@
 # RASP — Threat Model
 
-**Status:** Milestone 5 · **Not production-certified**
-Scope: the Milestone 5 prototype (mock **and local LLM** adapters, synthetic
+**Status:** Milestone 6 · **Not production-certified**
+Scope: the Milestone 6 prototype (mock **and local LLM** adapters, synthetic
 tools, PostgreSQL persistence with explicit `in_memory` opt-out, development
-identity, approval decision API, structured logging, and an offline adversarial
-evaluation harness). Later milestones change the surface and require this
-document to be updated.
+identity, approval decision API, structured logging, an offline adversarial
+evaluation harness, and a machine-checked controlled-pilot readiness gate).
+Later milestones change the surface and require this document to be updated.
 
 ## 1. Assets
 
@@ -71,6 +71,7 @@ claims in text are meaningless.
 | 26 | Local model proposes unsafe/malicious tool calls | Same enforcement as the mock: proposals are untrusted, schema-validated, and policy-checked; smuggled arguments, unknown tools, missing permissions are denied (tested adversarially) | how often a *real* model does this is unmeasured (the M5 harness scores RASP enforcement, not model propensity) |
 | 27 | Credentials/prompts leak through the local adapter | No cloud credentials required; only `RASP_LOCAL_MODEL_API_KEY` (optional, never logged) is sent; prompts/args/outputs never logged; error details carry status/type only (tested) | the local runtime itself is outside RASP's trust boundary |
 | 28 | Enforcement regression goes unnoticed | The M5 offline harness runs a corpus of attacks through the real pipeline and scores prevention/containment; committed report + JSON are asserted to match a fresh run, and a deliberately-broken case must be reported as a failure (tested) | a finite hand-written corpus; 100% ≠ un-breakable |
+| 29 | A pilot is run without acknowledging known gaps / on real data | `RASP_PILOT_MODE=controlled` refuses startup unless every documented gap id is acknowledged and recognized; unknown mode/id refuses startup (tested); pilot mode grants no extra authority (tested) | the gate records acceptance; it cannot verify auth/encryption/data or stop a dishonest operator |
 
 ## 5. Explicit non-claims
 
@@ -98,7 +99,10 @@ RASP does **not** claim to:
    the approval reviewer authorization added in M3 is **only** meaningful once
    the identity behind `X-Dev-Permissions` is trustworthy (Milestone 3+).
 3. Registered handlers are correct, reviewed, non-networked demo code.
-4. Synthetic data only until the pilot governance gate (Phase 5/6).
+4. Synthetic data only until the pilot governance gate (Phase 5/6). The M6
+   `RASP_PILOT_MODE` gate (docs/PILOT_READINESS.md) does not lift this: it
+   records acceptance of documented gaps, it does not verify authentication,
+   encryption, or data handling.
 5. One application instance is expected per deployment for policy caching;
    shared PostgreSQL state is durable, and approval consumption is race-safe at
    the database, but no multi-instance coordination or migration orchestration

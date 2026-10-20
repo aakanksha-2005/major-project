@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # Approval lifecycle: TTL for pending records (both backends).
     approval_ttl_seconds: int = Field(default=900, ge=30)
 
+    # Milestone 6 controlled-pilot gate. "off" (default) changes nothing.
+    # "controlled" requires every documented pre-pilot gap to be explicitly
+    # acknowledged (see docs/PILOT_READINESS.md); any other value refuses
+    # startup. This gate records human acceptance — it does NOT make RASP
+    # production-ready, and real authentication remains a hard prerequisite.
+    pilot_mode: str = "off"
+    pilot_acknowledged_gaps: str = ""
+
     # Milestone 2 persistence: PostgreSQL is the target store.
     # "postgres" (default) requires a reachable database before sensitive
     # actions execute (fail closed). "in_memory" is an EXPLICIT opt-out for

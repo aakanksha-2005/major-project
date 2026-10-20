@@ -1,10 +1,10 @@
-# Deployment and database operations (Milestone 4)
+# Deployment and database operations (Milestone 6)
 
 This document describes the verified PostgreSQL workflow: starting the
 database, initializing/migrating the schema, running the application, backing
 up and recovering data, and the exact behavior when persistence fails. It also
-covers the Milestone 3 structured-logging configuration and the Milestone 4
-local LLM adapter.
+covers the Milestone 3 structured-logging configuration, the Milestone 4
+local LLM adapter, and the Milestone 6 controlled-pilot gate.
 
 > **Prototype status.** These are development-grade procedures for a
 > single-instance prototype. They are not a production runbook: no TLS, no
@@ -240,3 +240,25 @@ uv run uvicorn rasp.main:app --host 127.0.0.1 --port 8000
   `GET {base}/api/tags` for `ollama`) and the structured logs
   (`rasp.gateway` warning `model adapter error`).
 - The adapter logs no prompts, arguments, outputs, endpoints, or credentials.
+
+## 11. Controlled-pilot mode (Milestone 6)
+
+Before any *supervised, synthetic-data-only* pilot, enable the fail-closed
+readiness gate. It is **not** a certification and changes no enforcement.
+
+```powershell
+$env:RASP_PILOT_MODE = "controlled"
+$env:RASP_PILOT_ACKNOWLEDGED_GAPS = "dev_identity_not_production_auth,synthetic_data_only_until_auth_and_hardening,audit_rows_mutable_by_db_credentials,no_log_signing_or_sink_control,no_live_model_safety_evaluation,no_rate_limiting,single_instance_no_ha,manual_db_recovery_runbook,human_oversight_required,no_fairness_or_accessibility_evaluation"
+uv run uvicorn rasp.main:app --host 127.0.0.1 --port 8000
+```
+
+- Startup **refuses** when `RASP_PILOT_MODE` is unknown, or when any required
+  acknowledgement id is missing or unrecognized. Operator action: read the
+  error, add the exact id from `docs/PILOT_READINESS.md` §3, and retry. Do not
+  "fix" a refusal by loosening the value.
+- When controlled mode is active, startup logs a `WARNING`
+  (`CONTROLLED PILOT MODE ENABLED`); this is expected.
+- The gate **cannot verify** authentication, encryption, backups, or data
+  classification. Those remain deployment responsibilities
+  (`docs/PILOT_READINESS.md` §2, `docs/GOVERNANCE.md`).
+- To leave pilot mode: set `RASP_PILOT_MODE=off` (or unset) and restart.

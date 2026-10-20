@@ -22,6 +22,7 @@ from rasp.persistence.repositories import (
     PostgresApprovalStore,
     PostgresAuditStore,
 )
+from rasp.pilot.readiness import PilotReadiness, validate_pilot_readiness
 from rasp.policy.config import (
     PolicyConfig,
     load_policy_file,
@@ -52,6 +53,8 @@ class Container:
     model: ModelAdapter
     executor: ControlledExecutor
     orchestrator: ChatOrchestrator
+    # Milestone 6 pilot readiness (mode + acknowledgements); always present.
+    pilot: PilotReadiness
     # Database is None for the explicitly configured in-memory mode.
     db: Database | None = None
     policy_repository: PolicyRepository | None = None
@@ -297,6 +300,10 @@ def build_container(settings: Settings) -> Container:
     policy_path = resolve_policy_path(settings)
     policy_config = load_policy_file(policy_path)
 
+    # M6: refuse startup when pilot mode is unknown or its acknowledgements are
+    # incomplete. This does not weaken any enforcement — it gates a *mode*.
+    pilot = validate_pilot_readiness(settings)
+
     registry = ToolRegistry()
     for definition in builtin_tool_definitions():
         registry.register(definition)
@@ -321,6 +328,7 @@ def build_container(settings: Settings) -> Container:
         model=model,
         executor=executor,
         orchestrator=orchestrator,
+        pilot=pilot,
         db=db,
         policy_repository=policy_repo,
     )

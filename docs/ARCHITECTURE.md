@@ -1,7 +1,8 @@
 # RASP — Architecture
 
-**Status:** Milestone 5 (mock + local LLM adapters, PostgreSQL persistence,
-approval decision API, structured logging, adversarial evaluation harness) ·
+**Status:** Milestone 6 (mock + local LLM adapters, PostgreSQL persistence,
+approval decision API, structured logging, adversarial evaluation harness,
+controlled-pilot readiness gate) ·
 **Version:** 0.1.0 · **Not production-certified**
 
 ## 1. Purpose
@@ -213,6 +214,7 @@ Security-relevant properties:
 | `privacy/redaction.py` | secret-shape redaction, truncation |
 | `risk/signals.py` | injection indicators (defense in depth) |
 | `evaluation/` | offline adversarial corpus + harness + report renderer/runner (M5) |
+| `pilot/` | controlled-pilot readiness gate (fail-closed mode/acknowledgement validation) (M6) |
 
 ## 8. Approval lifecycle (Milestone 3)
 
@@ -278,3 +280,30 @@ report.py  ──► docs/ADVERSARIAL_EVALUATION.md   (human-readable)
   with a violated expectation is reported as a failure, not silently passed.
 - M5 measures **RASP enforcement**, not a real model's propensity to attack
   (documented in `docs/LIMITATIONS.md`).
+
+## 10. Controlled-pilot readiness gate (Milestone 6)
+
+A fail-closed startup gate that prevents "controlled pilot" mode from being
+enabled silently. It is enforced in `build_container()` alongside policy
+validation, so `create_app()` refuses to serve on an unsatisfied gate.
+
+```text
+RASP_PILOT_MODE
+   ├─ "off" (default)      ──► no gate; behavior unchanged
+   ├─ "controlled"         ──► require EVERY documented gap id in
+   │                            RASP_PILOT_ACKNOWLEDGED_GAPS
+   │                            missing / unknown id ──► refuse startup
+   └─ anything else          ──► refuse startup (no silent fallback)
+```
+
+- **Opt-in & fail-closed:** mirrors `RASP_MODEL_PROVIDER` / `RASP_PERSISTENCE`
+  / log settings — an unknown value refuses startup.
+- **No extra authority:** enabling controlled mode changes no enforcement. A
+  disabled tool is still denied, and the health endpoint reveals no
+  configuration (both tested).
+- **Records, not certifies:** the gate records that a named human accepted the
+  documented gaps (`docs/PILOT_READINESS.md` §3). Hard prerequisites — real
+  authentication, encryption/backups, synthetic-only data — are **not**
+  verifiable by the gate and remain the operator's responsibility
+  (`docs/GOVERNANCE.md`, `docs/PILOT_PLAN.md`).
+- Startup logs a `WARNING` when controlled mode is active.

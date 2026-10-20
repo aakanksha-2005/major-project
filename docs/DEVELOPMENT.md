@@ -78,6 +78,8 @@ security-relevant settings:
 | `RASP_DATABASE_POOL_SIZE` / `_POOL_TIMEOUT` | `5` / `5.0` | asyncpg pool sizing |
 | `RASP_LOG_LEVEL` | `INFO` | unknown values refuse startup |
 | `RASP_LOG_FORMAT` | `json` | `json` or `text`; unknown values refuse startup |
+| `RASP_PILOT_MODE` | `off` | `off` or `controlled`; others refuse startup |
+| `RASP_PILOT_ACKNOWLEDGED_GAPS` | — | required in controlled mode; unknown/missing ids refuse startup |
 
 ## 5. Identity headers (development only)
 
@@ -136,6 +138,10 @@ Missing headers ⇒ zero permissions ⇒ everything sensitive is denied
   the real pipeline, asserts total prevention with zero false allows/denies,
   asserts the committed report/JSON match a fresh run, and tests the harness
   itself (a violated expectation must be reported as a failure).
+- **Pilot gate** (`tests/unit/test_pilot_readiness.py`) — the M6 gate:
+  unknown mode refuses startup, missing/unknown acknowledgement id refuses
+  startup, complete acknowledgements enable controlled mode, and pilot mode
+  grants no extra authority.
 - **PostgreSQL** (`tests/postgres/`, marker `postgres`) — real database:
   clean migration state (head `0002_approval_consumed`), restart durability
   (incl. consumed approvals), approval transitions, race-safe claim,
