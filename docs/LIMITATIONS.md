@@ -1,4 +1,4 @@
-# RASP — Known Limitations (v0.1, Milestone 3)
+# RASP — Known Limitations (v0.1, Milestone 4)
 
 Honest disclosure of what is and is not covered. Updated per milestone.
 
@@ -19,10 +19,13 @@ Honest disclosure of what is and is not covered. Updated per milestone.
 | Audit structural privacy, pseudonymization, scoping | `tests/unit/test_audit_privacy.py`, `tests/integration/test_audit_api.py` |
 | Chat lifecycle, step budget, 413 size limit | `tests/integration/test_api.py`, adversarial suite |
 | Direct/indirect injection, impersonation, executor-bypass probes, approval forging/replay/self-approval, log content canary | `tests/adversarial/` |
+| Model adapters: request building, OpenAI/Ollama response parsing, malformed/partial payloads, offline via injected `httpx.MockTransport` | `tests/unit/test_local_model.py` |
+| Local adapter in the full pipeline; provider failure (transport, non-2xx) fails closed with `model_unavailable` and no execution | `tests/integration/test_local_model_api.py` |
+| Hostile local-model output (tool calls, smuggled arguments, authority claims, malformed JSON) cannot bypass enforcement | `tests/adversarial/test_local_model_adversarial.py` |
 | PostgreSQL migrations (head `0002_approval_consumed`), restart durability of consumed approvals, durable decision audit events, race-safe claim, approval transitions/idempotency, content-free columns | `tests/postgres/test_pg_lifecycle.py` |
 | Database failure denies mutating actions before the handler; approval lookup/claim failures deny; read-only fallback is flagged; `/v1/audit` 503 | `tests/unit/test_persistence_fail_closed.py`, `tests/integration/test_db_unavailable.py` |
 
-Current run: **240 passed, 0 skipped** with PostgreSQL running (226 of them
+Current run: **277 passed, 0 skipped** with PostgreSQL running (263 of them
 need no database; the 14 `postgres`-marked tests skip with an explicit reason
 when it is not). Lint and format clean.
 
@@ -35,8 +38,11 @@ when it is not). Lint and format clean.
 - A compromised or malicious **registered handler** (handlers are trusted
   code by assumption).
 - OS/process-level escape (RASP does not sandbox handlers).
-- Real LLM misbehavior: all model tests use the deterministic mock;
-  local-model behavior arrives in Milestone 4.
+- Real LLM misbehavior: adapter *plumbing* is tested offline, but no
+  comparative evaluation of an actual local model's safety behavior has been
+  run (that is the Milestone 5 adversarial evaluation report). A local model
+  can and will propose unsafe tool calls; RASP denies them by policy, but how
+  *often* a given model does so is not yet measured.
 - Rate limiting and fair-use abuse (not implemented yet).
 - Audit tamper resistance: no signatures, hash chain, or external
   immutability. Events are durable in PostgreSQL, but anyone with database
@@ -84,8 +90,11 @@ when it is not). Lint and format clean.
   RASP never logs prompts, arguments, or outputs, and there is no code path
   that accepts content for logging. Where logs are shipped, retained, and who
   can read them is a deployment responsibility; no log signing exists.
-- **Model adapter:** only the deterministic mock (`RASP_MODEL_PROVIDER=mock`)
-  exists. Setting anything else refuses startup. Local adapter = M4.
+- **Model adapters:** the deterministic mock (`RASP_MODEL_PROVIDER=mock`) plus
+  local, credential-free adapters `local` (OpenAI-compatible HTTP) and
+  `ollama` (Ollama native API). Any other provider refuses startup. The local
+  adapters are tested offline (injected transport) and fail closed on provider
+  errors; no cloud/hosted provider is implemented or required.
 - **Single process, no rate limiting.** Do not deploy publicly.
 - **Policy file** is read at startup only; changes require restart.
 

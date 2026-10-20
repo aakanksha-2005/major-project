@@ -1,10 +1,10 @@
 # RASP — Threat Model
 
-**Status:** Milestone 3 · **Not production-certified**
-Scope: the Milestone 3 prototype (mock model, synthetic tools, PostgreSQL
-persistence with explicit `in_memory` opt-out, development identity, approval
-decision API, structured logging). Later milestones change the surface and
-require this document to be updated.
+**Status:** Milestone 4 · **Not production-certified**
+Scope: the Milestone 4 prototype (mock **and local LLM** adapters, synthetic
+tools, PostgreSQL persistence with explicit `in_memory` opt-out, development
+identity, approval decision API, structured logging). Later milestones change
+the surface and require this document to be updated.
 
 ## 1. Assets
 
@@ -66,6 +66,9 @@ claims in text are meaningless.
 | 22 | Approval replay / double execution | Single-use consumption: an approved record is atomically claimed (`approved → consumed`, conditional `UPDATE … WHERE status='approved'`) **before** the handler runs; a lost race/revoked/consumed approval denies and never executes; replay opens a fresh cycle (tested in-memory and on PostgreSQL, including concurrency) | none known at this layer |
 | 23 | Unauthorized approval read (existence oracle) | `approvals:read` required; non-reviewers are scoped to their own records; other principals' records return **404** (never 403), so existence is not confirmed (tested) | scoping is per-process; forward to real authz when auth lands |
 | 24 | Unknown log level/format silently falls back | Unknown `RASP_LOG_LEVEL`/`RASP_LOG_FORMAT` **refuse startup** (tested) | none known |
+| 25 | Local-model provider failure treated as "no action" / crashes the request | Any adapter error (transport, non-2xx, malformed JSON, missing field) raises `ModelAdapterError`; the orchestrator fails closed with `model_unavailable` and **executes no tool** (tested offline via injected transport) | model availability is an operational dependency |
+| 26 | Local model proposes unsafe/malicious tool calls | Same enforcement as the mock: proposals are untrusted, schema-validated, and policy-checked; smuggled arguments, unknown tools, missing permissions are denied (tested adversarially) | how often a *real* model does this is unmeasured until M5 |
+| 27 | Credentials/prompts leak through the local adapter | No cloud credentials required; only `RASP_LOCAL_MODEL_API_KEY` (optional, never logged) is sent; prompts/args/outputs never logged; error details carry status/type only (tested) | the local runtime itself is outside RASP's trust boundary |
 
 ## 5. Explicit non-claims
 
@@ -73,12 +76,15 @@ RASP does **not** claim to:
 
 - detect all prompt injections or jailbreaks;
 - stop a compromised application process from calling handlers directly;
-- provide tamper-proof audit (no signatures/chain in M2/M3);
+- provide tamper-proof audit (no signatures/chain in M2–M4);
 - replace the target system's own authorization;
 - provide production authentication (M1+ headers are development-only, and the
   approval reviewer authorization in M3 rests on those same forgeable headers);
 - protect against a malicious party who can read or alter the logs' sink
   (aggregation, retention, and access control for logs is deployment's job);
+- guarantee the safety of a *local model's* outputs — RASP contains and denies
+  unsafe proposals, but does not make the model itself safe (M4 measures
+  plumbing, not model behavior);
 - be bias-free, jailbreak-proof, or certified.
 
 ## 6. Assumptions
@@ -95,6 +101,9 @@ RASP does **not** claim to:
    is provided.
 6. The log sink is operated with appropriate access controls; RASP guarantees
    what it does *not* emit, not where the bytes end up.
+7. The local model runtime (M4) is treated as an untrusted *proposal source*
+   reachable over local HTTP; RASP assumes its responses may be malformed or
+   hostile and validates/authorizes everything it proposes.
 
 ## 7. Residual risks (documented, unresolved)
 

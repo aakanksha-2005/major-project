@@ -28,9 +28,9 @@ DESCRIPTION = """\
 
 Experimental prototype — not production-certified.
 
-The model (mock in Milestone 1) proposes actions; RASP independently
-authorizes and mediates every tool call. Model output is never an
-authorization decision.
+The model (mock by default; a local LLM adapter in Milestone 4) proposes
+actions; RASP independently authorizes and mediates every tool call. Model
+output is never an authorization decision.
 
 Authentication (development mechanism): send `X-Dev-Principal` and
 `X-Dev-Permissions` headers, e.g. `documents:read,system:status`.
@@ -57,9 +57,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_routes(app)
 
     logger.info(
-        "RASP started: policy_version=%s provider=%s prototype=true",
+        "RASP started: policy_version=%s model_id=%s provider=%s prototype=true",
         container.policy_config.version,
         container.model.model_id,
+        settings.model_provider,
     )
     return app
 

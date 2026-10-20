@@ -28,11 +28,13 @@ approvals, and risk scores cannot override application-enforced permissions.
 | M1 | Mock model + registry + policy engine + executor + audit + tests | ✅ done |
 | M2 | PostgreSQL persistence (SQLAlchemy, Alembic) | ✅ done |
 | M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | ✅ done |
-| M4 | Local LLM adapter | ⏳ next |
+| M4 | Local LLM adapter (OpenAI-compatible + Ollama native) | ✅ done |
 | M5 | Adversarial evaluation report with metrics | planned |
 | M6 | Controlled pilot preparation | planned |
 
-**Implemented now:** deterministic mock model, 6 synthetic tools, deterministic
+**Implemented now:** deterministic mock model, **local LLM adapters
+(OpenAI-compatible and Ollama-native, no cloud credentials)**, 6 synthetic
+tools, deterministic
 policy engine (allow / deny / require_approval / allow_with_constraints),
 controlled executor with timeouts and output validation, PostgreSQL persistence
 for audit events, approvals and policy metadata (SQLAlchemy async + Alembic;
@@ -41,11 +43,11 @@ digest-bound approvals with a validated state machine and **single-use
 consumption**, reviewer decision endpoints (`approve`/`reject`/`revoke`) with
 separation of duties and scoped read access, idempotent decisions, structured
 JSON logging with request-id correlation, body-size limits, development header
-identity, REST API, **240 automated tests** (including 14 that run against a
+identity, REST API, **277 automated tests** (including 14 that run against a
 real PostgreSQL instance).
 
-**Planned (not implemented):** local
-LLM adapter, rate limiting, real authentication, comparative evaluation harness.
+**Planned (not implemented):** rate limiting, real authentication,
+comparative evaluation harness.
 
 ## 3. Architecture and request lifecycle
 
@@ -83,21 +85,24 @@ Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## 5. Features: implemented vs planned
 
 See status table in §2. Every "implemented" claim is covered by a test in
-`tests/` and was executed for this release (**240 passed**, including 14
+`tests/` and was executed for this release (**277 passed**, including 14
 PostgreSQL-backed tests; 0 skipped when the database is running, and the
 PostgreSQL tests **skip with an explicit reason** — never silently — when it
-is not).
+is not). Model-adapter tests are fully offline (injected `httpx.MockTransport`).
 
 ## 6. Supported model adapters
 
 | Adapter | Provider id | Status |
 |---|---|---|
-| Deterministic mock | `mock` | implemented (only M1 target) |
-| Local OpenAI-compatible runtime | `local` | planned (M4) |
+| Deterministic mock | `mock` | implemented (default; offline) |
+| Local OpenAI-compatible runtime | `local` | **implemented (M4)** — Ollama, LM Studio, llama.cpp, vLLM, … |
+| Local Ollama native API | `ollama` | **implemented (M4)** |
 | Hosted provider | — | not started; needs explicit authorization |
 
 Setting `RASP_MODEL_PROVIDER` to anything unimplemented **refuses startup**
-(no silent fallback).
+(no silent fallback). Every adapter implements the same `ModelAdapter`
+interface; the local adapters require **no cloud credentials** and contact only
+the configured local host. See §13a for configuration and fail-closed behavior.
 
 ## 7. Prerequisites
 
@@ -122,7 +127,8 @@ uv sync
 Copy-Item .env.example .env   # edit as needed; NEVER commit .env
 ```
 
-Key settings: `RASP_POLICY_PATH`, `RASP_MODEL_PROVIDER=mock`,
+Key settings: `RASP_POLICY_PATH`, `RASP_MODEL_PROVIDER` (`mock` default, or
+`local`/`ollama`), `RASP_LOCAL_MODEL_BASE_URL` / `RASP_LOCAL_MODEL_NAME`,
 `RASP_MAX_AGENT_STEPS`, `RASP_MAX_REQUEST_BYTES`, `RASP_DEV_AUTH_ENABLED`,
 `RASP_PERSISTENCE` (`postgres` default, or explicit `in_memory`),
 `RASP_DATABASE_URL` (default `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp`),
@@ -258,6 +264,37 @@ Invoke-WebRequest -Uri http://127.0.0.1:8000/v1/chat -Method Post `
 # → action_status "denied", reason_code "tool_disabled"
 ```
 
+## 13a. Local LLM adapter (Milestone 4)
+
+RASP can drive a **locally hosted** model instead of the mock, with no cloud
+credentials and no egress beyond the configured host:
+
+```powershell
+# OpenAI-compatible server (Ollama, LM Studio, llama.cpp --server, vLLM, …):
+$env:RASP_MODEL_PROVIDER = "local"
+$env:RASP_LOCAL_MODEL_BASE_URL = "http://127.0.0.1:11434"   # /v1 is appended
+$env:RASP_LOCAL_MODEL_NAME = "llama3.2"
+# Ollama's native API instead:
+# $env:RASP_MODEL_PROVIDER = "ollama"
+uv run uvicorn rasp.main:app --reload
+```
+
+- The adapter posts to `{base_url}/v1/chat/completions`, parses text and
+  OpenAI-style `tool_calls` (arguments may be a JSON string or an object), and
+  returns the same `ModelResponse` as the mock — still an **untrusted
+  proposal**.
+- **Fail closed:** any transport error, non-2xx response, malformed JSON, or
+  missing field raises `ModelAdapterError`. The chat lifecycle then returns a
+  safe message with `security_flags: ["model_unavailable"]`, **no tool call is
+  executed**, and no endpoint/credential is leaked. A model outage is never
+  treated as authorization.
+- Timeouts: `RASP_LOCAL_MODEL_TIMEOUT_SECONDS` (default 30). Optional bearer
+  token: `RASP_LOCAL_MODEL_API_KEY` (never logged).
+- Tested offline with an injected `httpx.MockTransport` — no network or running
+  model is required to run the suite (`tests/unit/test_local_model.py`,
+  `tests/integration/test_local_model_api.py`,
+  `tests/adversarial/test_local_model_adversarial.py`).
+
 ## 14. Policy configuration
 
 Single YAML file, validated at startup; the app **refuses to start** on
@@ -284,8 +321,8 @@ permission → approval → allow. A deny at any step is final.
 ## 15. Running automated tests (verified)
 
 ```powershell
-uv run pytest                  # full suite: 240 passed (with PostgreSQL running)
-uv run pytest -m "not postgres"  # 226 passed / 14 skipped — no database required
+uv run pytest                  # full suite: 277 passed (with PostgreSQL running)
+uv run pytest -m "not postgres"  # 263 passed / 14 skipped — no database required
 uv run pytest -m postgres        # 14 passed against rasp_test
 uv run pytest tests/unit
 uv run pytest tests/integration
@@ -305,9 +342,13 @@ against any database name lacking "test".
 ## 16. Security and privacy design
 
 - Default deny; least privilege; independent enforcement in trusted code.
-- Fail closed: policy errors deny sensitive actions and are audited.
+- Fail closed: policy errors deny sensitive actions and are audited; a
+  model/provider failure (`ModelAdapterError`) yields a safe `model_unavailable`
+  response with no tool execution, never an authorization.
 - Audit events are structurally **content-free** (no prompts, arguments,
   or outputs — schema guarantee) with salted pseudonymized principals.
+- Local model adapters require no cloud credentials and contact only the
+  configured local host; prompts/arguments/outputs are never logged.
 - Approvals are digest-bound to the exact action and **single-use**: an
   approval authorizes exactly one execution and is atomically consumed by it.
   Replaying the action never re-executes it.
@@ -339,8 +380,9 @@ against any database name lacking "test".
 
 Summarized: development-only identity; PostgreSQL fails closed but is a
 single unencrypted instance (no HA/signing, `in_memory` remains an opt-out);
-pattern-based injection/secret detection is incomplete; no rate limiting; no
-local LLM yet; approval reviewer authz rests on the same forgeable dev
+pattern-based injection/secret detection is incomplete; no rate limiting; the
+local model adapter is fail-closed but real local-model misbehavior is not yet
+measured (M5); approval reviewer authz rests on the same forgeable dev
 headers until production authentication lands; single-process prototype.
 Full list: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 

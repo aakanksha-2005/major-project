@@ -14,6 +14,7 @@ from rasp.audit.service import AuditService
 from rasp.executor.executor import ControlledExecutor
 from rasp.gateway.lifecycle import ChatOrchestrator
 from rasp.models.base import ModelAdapter
+from rasp.models.local import LocalOpenAICompatibleAdapter, OllamaModelAdapter
 from rasp.models.mock import MockModelAdapter
 from rasp.persistence.db import Database
 from rasp.persistence.repositories import (
@@ -226,15 +227,34 @@ def builtin_tool_definitions() -> list[ToolDefinition]:
 
 
 def build_model_adapter(settings: Settings) -> ModelAdapter:
-    """Only the mock provider is implemented (Milestone 1).
+    """Build the configured model adapter.
 
-    Unknown providers refuse startup instead of silently falling back.
+    ``mock`` (M1) is deterministic and offline. ``local`` / ``ollama`` (M4)
+    target a locally hosted runtime and require no cloud credentials. Any
+    unknown provider refuses startup instead of silently falling back.
     """
-    if settings.model_provider == "mock":
+    provider = settings.model_provider
+    if provider == "mock":
         return MockModelAdapter()
+    if provider == "local":
+        return LocalOpenAICompatibleAdapter(
+            base_url=settings.local_model_base_url,
+            model_name=settings.local_model_name,
+            api_key=settings.local_model_api_key,
+            timeout_seconds=settings.local_model_timeout_seconds,
+            max_output_chars=settings.local_model_max_output_chars,
+        )
+    if provider == "ollama":
+        return OllamaModelAdapter(
+            base_url=settings.local_model_base_url,
+            model_name=settings.local_model_name,
+            api_key=settings.local_model_api_key,
+            timeout_seconds=settings.local_model_timeout_seconds,
+            max_output_chars=settings.local_model_max_output_chars,
+        )
     raise ValueError(
-        f"model provider '{settings.model_provider}' is not implemented yet; "
-        "only 'mock' is available in Milestone 1 (local adapter planned for M4)"
+        f"model provider '{provider}' is not implemented; "
+        "expected 'mock', 'local', or 'ollama' (no silent fallback)"
     )
 
 

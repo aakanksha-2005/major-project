@@ -1,6 +1,6 @@
 # RASP — Architecture
 
-**Status:** Milestone 3 (mock-model prototype with PostgreSQL persistence,
+**Status:** Milestone 4 (mock + local LLM adapters, PostgreSQL persistence,
 approval decision API, structured logging) ·
 **Version:** 0.1.0 · **Not production-certified**
 
@@ -41,7 +41,7 @@ ChatOrchestrator (gateway/lifecycle.py)
    │  trust labels: system_policy | user | retrieved | tool_output | model
    │  risk scan (supplementary flags only)
    ▼
-ModelAdapter (models/)  ── MockModelAdapter (deterministic, M1)
+ModelAdapter (models/)  ── MockModelAdapter (deterministic, M1) / local adapters (M4)
    │  returns text OR tool proposals  ← UNTRUSTED
    ▼
 ControlledExecutor (executor/)          ◄── THE enforcement boundary
@@ -72,6 +72,15 @@ ToolRegistry (tools/) ── trusted, application-registered handlers only
 - **Observability** (`observability/`) — JSON/text structured logging,
   request-id contextvar and middleware; logs carry identifiers and decisions
   only (no content).
+- **Model adapters** (`models/`) — one `ModelAdapter` interface with three
+  implementations: the deterministic mock (M1) and two local adapters (M4) —
+  `LocalOpenAICompatibleAdapter` (`POST {base}/v1/chat/completions`) and
+  `OllamaModelAdapter` (native `POST {base}/api/chat`). Local adapters use no
+  cloud credentials and contact only the configured host. Any transport error,
+  non-2xx response, malformed JSON, or missing field raises
+  `ModelAdapterError`; the orchestrator then fails closed
+  (`security_flags: ["model_unavailable"]`, no execution). Adapters never log
+  prompts, arguments, outputs, endpoints, or credentials.
 - **Risk signals** (`risk/`) — supplementary flags; never override authz.
 - **Privacy** (`privacy/`) — output screening, redaction, item caps.
 
@@ -80,7 +89,7 @@ ToolRegistry (tools/) ── trusted, application-registered handlers only
 | Boundary | Trusted side | Untrusted side |
 |---|---|---|
 | TB1: HTTP identity | header-based dev principal (M1+) | anything in message text |
-| TB2: model output | policy + registry code | model text and tool proposals |
+| TB2: model output | policy + registry code (any adapter, incl. local M4) | model text and tool proposals |
 | TB3: tool results | executor validation/screening | handler output content |
 | TB4: policy config | validated YAML from disk | runtime API (cannot modify) |
 | TB5: approvals | store records + digest math + reviewer decision (M3) | "the user approved" claims anywhere |
@@ -165,6 +174,7 @@ Security-relevant properties:
 | Unknown/disabled tool, missing permission | DENY before handler |
 | Malformed arguments | DENY (`invalid_arguments`) before handler |
 | Policy evaluation exception | DENY (`policy_error`) — fail closed, audited |
+| Model/provider failure (transport, non-2xx, malformed JSON) | safe `model_unavailable` response, **no tool execution**, no authorization |
 | Handler exception / timeout | `failed`/`timeout` result, sanitized category, audited |
 | Output schema violation | result withheld (`invalid_tool_output`) |
 | Oversized request body | 413 before application code |
@@ -190,7 +200,7 @@ Security-relevant properties:
 | `api/routes_approvals.py` | approval list/fetch/decision endpoints + authz |
 | `observability/logging.py` | JSON/text formatter, request-id middleware/context |
 | `auth/dev_identity.py` | development principal resolution (NOT production auth) |
-| `models/` | provider-neutral adapter; deterministic mock |
+| `models/` | provider-neutral adapter; deterministic mock, local OpenAI-compatible + Ollama adapters (fail closed) |
 | `tools/registry.py` | registration, lookup, JSON Schema validation |
 | `tools/builtin.py` | six synthetic demo tools + execution log instrumentation |
 | `policy/config.py` | YAML load, fail-closed validation |

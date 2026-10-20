@@ -20,7 +20,7 @@ from rasp.executor.executor import (
     ControlledExecutor,
     decision_summary,
 )
-from rasp.models.base import ModelAdapter
+from rasp.models.base import ModelAdapter, ModelAdapterError
 from rasp.models.mock import build_system_policy_message, encode_tool_result_content
 from rasp.privacy.redaction import screen_text
 from rasp.risk.signals import scan_text
@@ -111,7 +111,21 @@ class ChatOrchestrator:
             # simulates the model's reaction to the user message). Later
             # turns must respond to tool results, never re-propose blindly.
             options = ModelOptions(scenario=request.scenario if step == 0 else None)
-            response = await self._model.generate(messages, options=options)
+            try:
+                response = await self._model.generate(messages, options=options)
+            except ModelAdapterError as exc:
+                # Fail closed: a model/provider failure is never treated as
+                # authorization to act. No tool call is made and the request
+                # ends with a generic, content-free message. Detail is logged
+                # server-side without prompts or arguments.
+                logger.warning("model adapter error: %s", type(exc).__name__)
+                if "model_unavailable" not in runtime_flags:
+                    runtime_flags.append("model_unavailable")
+                final_text = (
+                    "The language model is currently unavailable, so no action "
+                    "was taken. Please try again later."
+                )
+                break
 
             if not response.tool_calls:
                 final_text = response.text or ""

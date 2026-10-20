@@ -1,9 +1,10 @@
-# Deployment and database operations (Milestone 3)
+# Deployment and database operations (Milestone 4)
 
 This document describes the verified PostgreSQL workflow: starting the
 database, initializing/migrating the schema, running the application, backing
 up and recovering data, and the exact behavior when persistence fails. It also
-covers the Milestone 3 structured-logging configuration.
+covers the Milestone 3 structured-logging configuration and the Milestone 4
+local LLM adapter.
 
 > **Prototype status.** These are development-grade procedures for a
 > single-instance prototype. They are not a production runbook: no TLS, no
@@ -213,3 +214,29 @@ startup** — there is no silent fallback.
   left untouched, so RASP logs integrate with whatever sink the environment
   provides. Ship them to an access-controlled, appropriately-retained store
   (aggregation is a deployment responsibility).
+
+## 10. Local LLM adapter (Milestone 4)
+
+RASP can run against a locally hosted model instead of the deterministic mock:
+
+```powershell
+$env:RASP_MODEL_PROVIDER = "local"                        # or "ollama"
+$env:RASP_LOCAL_MODEL_BASE_URL = "http://127.0.0.1:11434"
+$env:RASP_LOCAL_MODEL_NAME = "llama3.2"
+uv run uvicorn rasp.main:app --host 127.0.0.1 --port 8000
+```
+
+- `local` posts to `{base}/v1/chat/completions` (OpenAI-compatible: Ollama,
+  LM Studio, llama.cpp `--server`, vLLM, …). The `/v1` suffix is added
+  automatically unless already present.
+- `ollama` posts to `{base}/api/chat` (Ollama's native API).
+- No cloud credentials and no egress beyond `RASP_LOCAL_MODEL_BASE_URL`.
+  `RASP_LOCAL_MODEL_API_KEY` is optional and is never logged.
+- **Fail closed:** any transport error, non-2xx response, malformed JSON, or
+  missing field raises `ModelAdapterError`. The chat request then returns a
+  safe message with `security_flags: ["model_unavailable"]` and **no tool
+  execution** — a model outage is never authorization. Operator action: check
+  the local runtime's health (`GET {base}/v1/models` for `local`,
+  `GET {base}/api/tags` for `ollama`) and the structured logs
+  (`rasp.gateway` warning `model adapter error`).
+- The adapter logs no prompts, arguments, outputs, endpoints, or credentials.

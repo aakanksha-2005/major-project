@@ -55,7 +55,11 @@ security-relevant settings:
 | Variable | Default | Notes |
 |---|---|---|
 | `RASP_POLICY_PATH` | `config/policies.example.yaml` | startup fails on invalid policy |
-| `RASP_MODEL_PROVIDER` | `mock` | only `mock` implemented; others refuse startup |
+| `RASP_MODEL_PROVIDER` | `mock` | `mock`, `local`, or `ollama`; others refuse startup |
+| `RASP_LOCAL_MODEL_BASE_URL` | `http://127.0.0.1:11434` | local adapter target (no cloud) |
+| `RASP_LOCAL_MODEL_NAME` | `llama3.2` | model name sent to the local runtime |
+| `RASP_LOCAL_MODEL_TIMEOUT_SECONDS` | `30.0` | local model request timeout |
+| `RASP_LOCAL_MODEL_API_KEY` | — | optional bearer token; never logged |
 | `RASP_MAX_AGENT_STEPS` | `3` | tool-loop budget |
 | `RASP_MAX_REQUEST_BYTES` | `1000000` | 413 beyond this |
 | `RASP_DEV_AUTH_ENABLED` | `true` | development header identity |
@@ -108,15 +112,18 @@ Missing headers ⇒ zero permissions ⇒ everything sensitive is denied
 
 - **Unit** — components in isolation (engine, registry, executor with
   counter handlers, approval digests/state machine/lifecycle/claim,
-  approval concurrency, audit/redaction, logging formatter, fail-closed
+  approval concurrency, audit/redaction, logging formatter,
+  model adapters with injected `httpx.MockTransport`, fail-closed
   persistence doubles).
 - **Integration** — full ASGI app via httpx; no network, no DB, no keys.
   Includes an unreachable-database suite proving handlers are never reached,
-  the approval decision API (authz, scoping, idempotency, forging), and the
-  structured-logging content canaries.
+  the approval decision API (authz, scoping, idempotency, forging), the
+  structured-logging content canaries, and the local-model adapter driven by
+  an injected `httpx.MockTransport` (fail-closed provider errors).
 - **Adversarial** — injection, impersonation, tampering, bypass, size
-  limits, approval forging/replay/self-approval, log content; every assertion
-  proves enforcement or flags the gap honestly.
+  limits, approval forging/replay/self-approval, log content, and hostile
+  local-model output (tool calls, smuggled arguments, authority claims);
+  every assertion proves enforcement or flags the gap honestly.
 - **PostgreSQL** (`tests/postgres/`, marker `postgres`) — real database:
   clean migration state (head `0002_approval_consumed`), restart durability
   (incl. consumed approvals), approval transitions, race-safe claim,

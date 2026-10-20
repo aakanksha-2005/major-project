@@ -146,7 +146,7 @@ class MockModelAdapter(ModelAdapter):
         snippet = " ".join(content.split())[:200]
         return self._text(
             f"Deterministic mock reply to: {snippet}. "
-            "Configure a local model adapter (Milestone 4) for real answers."
+            "Set RASP_MODEL_PROVIDER=local to use a real local model."
         )
 
     def _summarize_tool_result(self, message: ModelMessage) -> ModelResponse:

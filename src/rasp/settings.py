@@ -25,9 +25,20 @@ class Settings(BaseSettings):
     # security settings must prevent the application from starting.
     policy_path: str = "config/policies.example.yaml"
 
-    # Only "mock" is implemented for Milestone 1. "local" is planned (M4)
-    # and must not be assumed functional.
+    # Model provider selection. "mock" (M1) is deterministic and needs no
+    # network. "local" (M4) talks to an OpenAI-compatible local server;
+    # "ollama" (M4) talks to Ollama's native API. Any other value refuses
+    # startup (no silent fallback, no cloud providers).
     model_provider: str = "mock"
+
+    # Milestone 4 local adapter. No cloud credentials are used or required:
+    # these point at a locally hosted runtime. `local_model_api_key` is
+    # optional (some local gateways want a bearer token) and is never logged.
+    local_model_base_url: str = "http://127.0.0.1:11434"
+    local_model_name: str = "llama3.2"
+    local_model_api_key: str | None = None
+    local_model_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    local_model_max_output_chars: int = Field(default=4000, ge=64)
 
     # Loop / size budgets (defense against unbounded tool-call loops).
     max_agent_steps: int = Field(default=3, ge=1, le=16)
