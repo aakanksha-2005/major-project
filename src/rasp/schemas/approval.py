@@ -23,6 +23,10 @@ class ApprovalStatus(StrEnum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     INVALIDATED = "invalidated"
+    # Milestone 3: single-use consumption. An approved record is consumed
+    # when the authorized action actually executes; replaying the identical
+    # action afterwards requires a fresh human approval (never re-executes).
+    CONSUMED = "consumed"
 
 
 def compute_action_digest(
@@ -64,6 +68,9 @@ class ApprovalRecord(BaseModel):
     expires_at: datetime
     decided_at: datetime | None = None
     reviewer_ref: str | None = None
+    # Milestone 3: set exactly when the approval was claimed for execution
+    # (status approved -> consumed). None until then.
+    consumed_at: datetime | None = None
 
     def is_valid_for(
         self,
@@ -72,7 +79,11 @@ class ApprovalRecord(BaseModel):
         principal_ref: str,
         now: datetime | None = None,
     ) -> bool:
-        """True only if this approval currently authorizes exactly this action."""
+        """True only if this approval currently authorizes exactly this action.
+
+        Consumed, rejected, expired, invalidated, and pending records are never
+        valid: one approval authorizes at most one execution.
+        """
         now = now or datetime.now(UTC)
         if self.status != ApprovalStatus.APPROVED:
             return False

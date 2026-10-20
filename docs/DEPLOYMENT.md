@@ -1,8 +1,9 @@
-# Deployment and database operations (Milestone 2)
+# Deployment and database operations (Milestone 3)
 
 This document describes the verified PostgreSQL workflow: starting the
 database, initializing/migrating the schema, running the application, backing
-up and recovering data, and the exact behavior when persistence fails.
+up and recovering data, and the exact behavior when persistence fails. It also
+covers the Milestone 3 structured-logging configuration.
 
 > **Prototype status.** These are development-grade procedures for a
 > single-instance prototype. They are not a production runbook: no TLS, no
@@ -60,7 +61,9 @@ Any PostgreSQL ≥ 14 works: create a database and user, then set
 ## 3. Migrations (schema initialization)
 
 Migrations are the **only** way the schema is created
-(`migrations/versions/2026_10_19_0001_initial.py`):
+(`migrations/versions/2026_10_19_0001_initial.py`,
+`migrations/versions/2026_10_20_0002_approval_consumed.py`; head is
+`0002_approval_consumed`):
 
 ```powershell
 uv run alembic upgrade head              # apply all migrations (connects to RASP_DATABASE_URL)
@@ -73,11 +76,14 @@ uv run alembic downgrade base            # drop everything (destructive; require
   committed to `alembic.ini`.
 - Tables created: `policies` (which policy versions were in force and their
   configuration), `approval_requests` (digest-bound approvals with a status
-  CHECK constraint and a partial unique index allowing at most one *pending*
-  record per exact action), and `audit_events` (sanitized, content-free
-  columns mirroring the `AuditEvent` schema — there is no column for prompts,
-  arguments, outputs, credentials, or records).
-- `alembic upgrade head` is idempotent; re-running it is safe.
+  CHECK constraint including the `consumed` terminal state, a `consumed_at`
+  timestamp, a partial unique index allowing at most one *pending* record per
+  exact action, and an `ix_approval_action` lookup index), and `audit_events`
+  (sanitized, content-free columns mirroring the `AuditEvent` schema — there is
+  no column for prompts, arguments, outputs, credentials, or records).
+- Milestone 3 adds revision `0002_approval_consumed` (single-use consumption);
+  `alembic upgrade head` brings any prior `0001_initial` database forward.
+  `alembic upgrade head` is idempotent; re-running it is safe.
 
 ## 4. Application startup (end-to-end quickstart)
 
@@ -108,9 +114,11 @@ Database failure **prevents sensitive actions from executing**:
 |---|---|
 | Mutating (non-read-only) tool, audit write fails | **DENY** with `reason_code: persistence_error`; pre-execution authorization event could not be recorded, so the handler never runs |
 | Approval-required tool, pending record cannot be persisted | **DENY** with `reason_code: persistence_error` (an unpersistable approval could never be honored) |
+| Approval state cannot be read (lookup fails) | **DENY** with `reason_code: persistence_error` (an unknowable approval state is never treated as "no approval") |
+| Approval claim fails after approval (concurrent winner / DB outage) | **DENY** (`approval_invalid` or `persistence_error`); the handler never runs and the approval is never over-consumed |
 | Read-only tool, post-hoc audit write fails | Executes (documented fallback), response/outcome carries `security_flags: ["audit_persistence_failed"]` |
 | Plain chat, request-level audit write fails | Chat still responds; `audit_persistence_failed` flag appears in `security_flags` |
-| `GET /v1/audit`, query fails | Structured **503** `persistence_unavailable` (never an unhandled crash) |
+| `GET /v1/audit` or `/v1/approvals`, query fails | Structured **503** `persistence_unavailable` (never an unhandled crash) |
 
 Unit and app-level tests for all of these run *without* PostgreSQL
 (`tests/unit/test_persistence_fail_closed.py`,
@@ -183,3 +191,25 @@ Honest expectations for this prototype:
   `RASP_DATABASE_POOL_TIMEOUT`, `RASP_DATABASE_STATEMENT_TIMEOUT_MS`.
 - Restarting the database while the app runs is safe: in-flight writes fail
   closed (§5), subsequent checkouts recover automatically.
+
+## 9. Structured logging (Milestone 3)
+
+Configured via `RASP_LOG_LEVEL` (default `INFO`) and `RASP_LOG_FORMAT`
+(default `json`, or `text` for local reading). **Unknown values refuse
+startup** — there is no silent fallback.
+
+- Every request runs through the request-id middleware
+  (`src/rasp/observability/logging.py`), which establishes a request id
+  (honouring a well-formed inbound `X-Request-Id`, `^[A-Za-z0-9._-]{1,64}$`),
+  echoes it back in the response, and emits **one** access line per request:
+  `method`, `path`, `status`, `duration_ms`, and the (pseudonymized) request id.
+- Query strings and request/response bodies are **never** logged.
+- Application logs contain identifiers, decisions, and reason codes only.
+  There is no log API that accepts prompts, tool arguments, outputs, records,
+  or credentials — the privacy guarantee holds by construction and is asserted
+  by content-canary tests (`tests/integration/test_logging.py`,
+  `tests/adversarial/`).
+- The handler attaches to the `rasp` logger only; root and uvicorn handlers are
+  left untouched, so RASP logs integrate with whatever sink the environment
+  provides. Ship them to an access-controlled, appropriately-retained store
+  (aggregation is a deployment responsibility).

@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     audit_pseudonym_salt: str = "dev-only-salt-rotate-in-production"
     audit_buffer_size: int = Field(default=5000, ge=16)
 
+    # Milestone 3 structured logging. Unknown level/format refuse startup
+    # (no silent fallback). Logs never contain prompts/arguments/outputs.
+    log_level: str = "INFO"
+    log_format: str = "json"  # Literal["json", "text"]
+
     # Approval lifecycle: TTL for pending records (both backends).
     approval_ttl_seconds: int = Field(default=900, ge=30)
 

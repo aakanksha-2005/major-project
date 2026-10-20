@@ -50,14 +50,21 @@ class PolicyEngine:
         arguments: dict[str, Any],
         principal: Principal | None,
         approval: ApprovalRecord | None = None,
+        approval_principal_ref: str | None = None,
     ) -> PolicyDecision:
         """Evaluate one proposed action.
+
+        `approval_principal_ref` is the *stored* (pseudonymized) principal
+        reference the approval is bound to. Digest binding always uses the raw
+        `principal.principal_id`; this argument is only used for the
+        record-level principal comparison. When omitted it defaults to the raw
+        principal id (Milestone 1/2 behaviour).
 
         Returns deny outcomes normally; raises PolicyEvaluationError only on
         internal failure so callers can fail closed.
         """
         try:
-            return self._evaluate(tool_id, arguments, principal, approval)
+            return self._evaluate(tool_id, arguments, principal, approval, approval_principal_ref)
         except PolicyEvaluationError:
             raise
         except Exception as exc:  # unexpected error -> fail closed upstream
@@ -88,6 +95,7 @@ class PolicyEngine:
         arguments: dict[str, Any],
         principal: Principal | None,
         approval: ApprovalRecord | None,
+        approval_principal_ref: str | None = None,
     ) -> PolicyDecision:
         # 1. Authentication context.
         if principal is None:
@@ -166,7 +174,9 @@ class PolicyEngine:
 
         # 8. Approval requirements.
         if entry.requires_approval:
-            decision = self._approval_decision(tool_id, entry, arguments, principal, approval)
+            decision = self._approval_decision(
+                tool_id, entry, arguments, principal, approval, approval_principal_ref
+            )
             if decision is not None:
                 return decision
 
@@ -203,6 +213,7 @@ class PolicyEngine:
         arguments: dict[str, Any],
         principal: Principal,
         approval: ApprovalRecord | None,
+        approval_principal_ref: str | None = None,
     ) -> PolicyDecision | None:
         """Return a decision when approval blocks the action, else None."""
         if approval is None or approval.status == ApprovalStatus.PENDING:
@@ -219,7 +230,10 @@ class PolicyEngine:
             ApprovalStatus.REJECTED,
             ApprovalStatus.EXPIRED,
             ApprovalStatus.INVALIDATED,
+            ApprovalStatus.CONSUMED,
         ):
+            # A consumed approval already authorized one execution: it can
+            # never authorize a second. Terminal statuses deny fail-closed.
             return self._deny(
                 ReasonCode.APPROVAL_INVALID,
                 "The approval for this action is not valid.",
@@ -234,7 +248,7 @@ class PolicyEngine:
         policy_changed = approval.policy_version != self._config.version
         if policy_changed or not approval.is_valid_for(
             action_digest=current_digest,
-            principal_ref=principal.principal_id,
+            principal_ref=approval_principal_ref or principal.principal_id,
             now=datetime.now(UTC),
         ):
             return self._deny(

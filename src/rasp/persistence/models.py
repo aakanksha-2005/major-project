@@ -51,7 +51,7 @@ class ApprovalRow(Base):
     __tablename__ = "approval_requests"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','approved','rejected','expired','invalidated')",
+            "status IN ('pending','approved','rejected','expired','invalidated','consumed')",
             name="ck_approval_status",
         ),
         # At most ONE pending record per (action, principal): duplicate
@@ -64,6 +64,9 @@ class ApprovalRow(Base):
             unique=True,
             postgresql_where="status = 'pending'",
         ),
+        # Lookup of the effective record for an exact action, regardless of
+        # status (Milestone 3 approved-execution path).
+        Index("ix_approval_action", "action_digest", "principal_ref", "tool_id"),
         Index("ix_approval_status_expires", "status", "expires_at"),
         Index("ix_approval_request_id", "request_id"),
     )
@@ -83,6 +86,9 @@ class ApprovalRow(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Milestone 3: set exactly when an approved record is claimed for
+    # execution (status approved -> consumed); single-use enforcement.
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditEventRow(Base):

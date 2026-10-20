@@ -41,12 +41,12 @@ on Python 3.14.
 
 ## 4. Tests that pass or fail
 
-Baseline after Milestone 0 + 1 implementation:
+Latest full run (Milestone 3):
 
 ```
-144 passed  (uv run pytest)
-ruff check src tests   -> All checks passed!
-ruff format --check    -> 58 files already formatted
+240 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
+226 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
+ruff check src tests migrations   -> All checks passed!
 ```
 
 Live verification (real HTTP against `uvicorn rasp.main:app`):
@@ -82,7 +82,7 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 - Source: `src/rasp/**` (gateway, models, tools, policy, risk, approvals,
   executor, audit, privacy, auth, api, schemas, container, main, settings)
 - Policy: `config/policies.example.yaml`
-- Tests: `tests/{unit,integration,adversarial}/**` (144 tests)
+- Tests: `tests/{unit,integration,adversarial,postgres}/**` (240 tests)
 - Docs: `docs/{BASELINE_REPORT,ARCHITECTURE,THREAT_MODEL,LIMITATIONS,DEVELOPMENT}.md`,
   `README.md` (replaces placeholder), `scripts/*`
 
@@ -92,9 +92,9 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 |---|---|---|
 | M0 | Repository inspection, baseline, architecture, threat model | **done** |
 | M1 | FastAPI + mock model + registry + policy engine + executor + audit + tests | **done** |
-| M2 | PostgreSQL persistence (SQLAlchemy, Alembic, repositories) | next |
-| M3 | Approval lifecycle endpoints, reviewer authz, idempotency, structured logging | planned |
-| M4 | Local LLM adapter behind the same model interface | planned |
+| M2 | PostgreSQL persistence (SQLAlchemy, Alembic, repositories) | **done** |
+| M3 | Approval lifecycle endpoints, reviewer authz, idempotency, structured logging | **done** |
+| M4 | Local LLM adapter behind the same model interface | next |
 | M5 | Adversarial evaluation report with metrics | planned |
 | M6 | Controlled pilot preparation | planned |
 

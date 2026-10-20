@@ -21,6 +21,20 @@ Milestone 2 persistence rules (fail closed):
   - READ-ONLY tools may execute when post-hoc audit persistence fails
     (documented fallback, docs/LIMITATIONS.md); the outcome carries an
     `audit_persistence_failed` security flag.
+
+Milestone 3 approval-consumption rules (fail closed, single-use):
+  - When policy requires approval, the executor looks up the effective
+    record for THIS exact action. A live pending record keeps the action
+    parked (idempotent). An approved record authorizes exactly one
+    execution.
+  - Before the handler runs, an approved record is atomically CLAIMED
+    (approved -> consumed). If the claim fails — a concurrent executor won
+    the race, the approval was revoked, or persistence is down — the action
+    is denied and the handler never runs.
+  - Replaying an identical action after consumption opens a FRESH approval
+    cycle (a new human decision); it never re-executes.
+  - A rejected or revoked (invalidated) exact action is denied fail-closed;
+    it cannot be silently re-requested.
 """
 
 from __future__ import annotations
@@ -34,12 +48,12 @@ from typing import Any
 
 import jsonschema
 
-from rasp.approvals.store import ApprovalStore
+from rasp.approvals.store import ApprovalStore, InvalidApprovalTransition
 from rasp.audit.service import AuditService
 from rasp.auth.dev_identity import Principal
 from rasp.policy.engine import PolicyEngine, PolicyEvaluationError
 from rasp.privacy.redaction import screen_output_payload, truncate_items
-from rasp.schemas.approval import compute_action_digest
+from rasp.schemas.approval import ApprovalStatus, compute_action_digest
 from rasp.schemas.audit import AuditEvent, AuditEventType
 from rasp.schemas.chat import DecisionSummary
 from rasp.schemas.execution import (
@@ -54,6 +68,17 @@ from rasp.tools.registry import ToolRegistry
 logger = logging.getLogger("rasp.executor")
 
 AUDIT_PERSISTENCE_FLAG = "audit_persistence_failed"
+
+# Statuses whose effective record must be handed to the policy engine so it
+# can deny fail-closed (never silently open a fresh approval cycle).
+_POLICY_VISIBLE_STATUSES = frozenset(
+    {
+        ApprovalStatus.PENDING,
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.REJECTED,
+        ApprovalStatus.INVALIDATED,
+    }
+)
 
 
 class ControlledExecutor:
@@ -81,9 +106,8 @@ class ControlledExecutor:
     ) -> ExecutionOutcome:
         correlation = correlation_id or request_id
         flags = list(risk_flags or [])
-        principal_ref = self._audit.principal_ref(
-            principal.principal_id if principal else "unauthenticated"
-        )
+        raw_principal_id = principal.principal_id if principal else "unauthenticated"
+        principal_ref = self._audit.principal_ref(raw_principal_id)
 
         # 1-4. Fresh policy evaluation (validates id, schema, permission,
         # approval, constraints). Policy failure -> fail closed.
@@ -140,16 +164,91 @@ class ControlledExecutor:
                 security_flags=flags,
             )
 
-        # 5b. Approval required: create a persistent pending record. If the
-        # record cannot be persisted, fail closed (deny) — an unpersistable
-        # approval could never be honored later anyway.
+        # 5b. Approval required. Before parking the action, check whether an
+        # approval already governs THIS exact action:
+        #   - live PENDING  -> keep it parked (idempotent, same approval id);
+        #   - APPROVED      -> engine re-verifies binding, then we claim it
+        #                      (single-use) and fall through to execution;
+        #   - REJECTED/INVALIDATED -> engine denies fail-closed;
+        #   - EXPIRED/CONSUMED     -> start a FRESH approval cycle below.
+        # The lookup itself needs persistence; a failure denies (fail closed),
+        # because the approval state of the action is unknowable.
+        digest: str | None = None
+        approval_execution = False
         if decision.outcome == DecisionOutcome.REQUIRE_APPROVAL:
             digest = compute_action_digest(
                 proposal.tool_id,
                 proposal.arguments,
-                principal.principal_id if principal else "unauthenticated",
+                raw_principal_id,
                 decision.policy_version,
             )
+            try:
+                record = await self._approvals.find_for_action(
+                    action_digest=digest,
+                    principal_ref=principal_ref,
+                    tool_id=proposal.tool_id,
+                )
+            except Exception:
+                logger.exception(
+                    "approval lookup failed for %s — failing closed",
+                    proposal.tool_id,
+                )
+                return await self._deny_persistence(
+                    proposal,
+                    policy_version=decision.policy_version,
+                    principal_ref=principal_ref,
+                    request_id=request_id,
+                    correlation_id=correlation,
+                    flags=flags,
+                )
+            if record is not None and record.status in _POLICY_VISIBLE_STATUSES:
+                try:
+                    decision = self._engine.evaluate(
+                        tool_id=proposal.tool_id,
+                        arguments=proposal.arguments,
+                        principal=principal,
+                        approval=record,
+                        approval_principal_ref=principal_ref,
+                    )
+                except PolicyEvaluationError:
+                    return await self._deny_policy_error(
+                        proposal,
+                        policy_version=self._engine.policy_version,
+                        principal_ref=principal_ref,
+                        request_id=request_id,
+                        correlation_id=correlation,
+                        flags=flags,
+                    )
+                if decision.outcome in (
+                    DecisionOutcome.ALLOW,
+                    DecisionOutcome.ALLOW_WITH_CONSTRAINTS,
+                ):
+                    approval_execution = True
+                elif decision.outcome == DecisionOutcome.DENY:
+                    # Rejected/revoked/invalid: terminal for this exact action.
+                    await self._emit_decision(
+                        decision,
+                        principal_ref=principal_ref,
+                        request_id=request_id,
+                        correlation_id=correlation,
+                        execution_status="not_executed",
+                        approval_id=record.approval_id,
+                        action_digest=digest,
+                        flags=flags,
+                    )
+                    return ExecutionOutcome(
+                        decision=decision,
+                        result=ExecutionResult(
+                            tool_id=proposal.tool_id,
+                            status=ExecutionStatus.BLOCKED,
+                            error_category=decision.reason_code.value,
+                        ),
+                        approval_id=record.approval_id,
+                        security_flags=flags,
+                    )
+
+        if decision.outcome == DecisionOutcome.REQUIRE_APPROVAL:
+            assert digest is not None
             try:
                 approval = await self._approvals.create_pending(
                     request_id=request_id,
@@ -179,6 +278,7 @@ class ControlledExecutor:
                 correlation_id=correlation,
                 execution_status="pending_approval",
                 approval_id=approval.approval_id,
+                action_digest=digest,
                 flags=flags,
             )
             await self._safe_record(
@@ -226,7 +326,9 @@ class ControlledExecutor:
                     policy_version=decision.policy_version,
                     decision=decision.outcome,
                     reason_code=decision.reason_code,
+                    approval_id=decision.approval_id,
                     execution_status="authorized",
+                    action_digest=digest,
                     security_flags=flags,
                 ),
                 flags=flags,
@@ -240,6 +342,65 @@ class ControlledExecutor:
                     correlation_id=correlation,
                     flags=flags,
                 )
+
+        # 6b. Single-use consumption: an approval authorizes ONE execution.
+        # The record is claimed (approved -> consumed) BEFORE the handler runs.
+        # A failed claim (concurrent winner / revoked / persistence down) means
+        # the approval is no longer valid — deny and never execute.
+        if approval_execution:
+            assert decision.approval_id is not None
+            try:
+                claimed = await self._approvals.claim(decision.approval_id)
+            except InvalidApprovalTransition:
+                decision = PolicyDecision(
+                    outcome=DecisionOutcome.DENY,
+                    reason_code=ReasonCode.APPROVAL_INVALID,
+                    message=(
+                        "The approval is no longer valid (already used or "
+                        "withdrawn); the action was denied."
+                    ),
+                    policy_version=decision.policy_version,
+                    tool_id=proposal.tool_id,
+                    approval_id=decision.approval_id,
+                )
+                await self._emit_decision(
+                    decision,
+                    principal_ref=principal_ref,
+                    request_id=request_id,
+                    correlation_id=correlation,
+                    execution_status="not_executed",
+                    approval_id=decision.approval_id,
+                    action_digest=digest,
+                    flags=flags,
+                )
+                return ExecutionOutcome(
+                    decision=decision,
+                    result=ExecutionResult(
+                        tool_id=proposal.tool_id,
+                        status=ExecutionStatus.BLOCKED,
+                        error_category=ReasonCode.APPROVAL_INVALID.value,
+                    ),
+                    approval_id=decision.approval_id,
+                    security_flags=flags,
+                )
+            except Exception:
+                logger.exception(
+                    "approval claim failed for %s — failing closed",
+                    decision.approval_id,
+                )
+                return await self._deny_persistence(
+                    proposal,
+                    policy_version=decision.policy_version,
+                    principal_ref=principal_ref,
+                    request_id=request_id,
+                    correlation_id=correlation,
+                    flags=flags,
+                )
+            logger.info(
+                "approval consumed for execution: approval_id=%s tool_id=%s",
+                claimed.approval_id,
+                claimed.tool_id,
+            )
 
         started = time.perf_counter()
         status = ExecutionStatus.EXECUTED
@@ -316,6 +477,7 @@ class ControlledExecutor:
             execution_status=audit_status,
             duration_ms=duration_ms,
             error_category=error_category,
+            action_digest=digest,
             flags=flags,
         )
         if status != ExecutionStatus.EXECUTED:
@@ -332,9 +494,11 @@ class ControlledExecutor:
                     policy_version=decision.policy_version,
                     decision=decision.outcome,
                     reason_code=decision.reason_code,
+                    approval_id=decision.approval_id,
                     execution_status=audit_status,
                     duration_ms=duration_ms,
                     error_category=error_category,
+                    action_digest=digest,
                     security_flags=flags,
                 ),
                 flags=flags,
@@ -344,6 +508,43 @@ class ControlledExecutor:
             decision=decision,
             result=result,
             approval_id=decision.approval_id,
+            security_flags=flags,
+        )
+
+    async def _deny_policy_error(
+        self,
+        proposal: ToolProposal,
+        *,
+        policy_version: str,
+        principal_ref: str,
+        request_id: str,
+        correlation_id: str,
+        flags: list[str],
+    ) -> ExecutionOutcome:
+        """Fail closed when re-evaluation with an approval crashed."""
+        decision = PolicyDecision(
+            outcome=DecisionOutcome.DENY,
+            reason_code=ReasonCode.POLICY_ERROR,
+            message="Policy evaluation failed; the action was denied.",
+            policy_version=policy_version,
+            tool_id=proposal.tool_id,
+        )
+        await self._emit_decision(
+            decision,
+            principal_ref=principal_ref,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            execution_status="not_executed",
+            error_category="PolicyEvaluationError",
+            flags=flags,
+        )
+        return ExecutionOutcome(
+            decision=decision,
+            result=ExecutionResult(
+                tool_id=proposal.tool_id,
+                status=ExecutionStatus.BLOCKED,
+                error_category=ReasonCode.POLICY_ERROR.value,
+            ),
             security_flags=flags,
         )
 
@@ -411,6 +612,7 @@ class ControlledExecutor:
         duration_ms: float | None = None,
         error_category: str | None = None,
         approval_id: str | None = None,
+        action_digest: str | None = None,
         flags: list[str] | None = None,
     ) -> None:
         await self._safe_record(
@@ -428,6 +630,7 @@ class ControlledExecutor:
                 execution_status=execution_status,
                 duration_ms=duration_ms,
                 error_category=error_category,
+                action_digest=action_digest,
                 security_flags=list(flags or []),
             ),
             flags=flags if flags is not None else [],

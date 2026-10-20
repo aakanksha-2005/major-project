@@ -1,4 +1,4 @@
-# RASP — Known Limitations (v0.1, Milestone 2)
+# RASP — Known Limitations (v0.1, Milestone 3)
 
 Honest disclosure of what is and is not covered. Updated per milestone.
 
@@ -12,20 +12,26 @@ Honest disclosure of what is and is not covered. Updated per milestone.
 | Deny ⇒ handler never invoked (counter tools) | `tests/unit/test_executor.py` |
 | Timeouts, output-schema validation, output caps, redaction | `tests/unit/test_executor.py` |
 | Approval binding/tampering/expiry/replay-shaped cases | `tests/unit/test_approvals.py`, engine tests |
+| Approval lifecycle: decide/claim/find_for_action, self-approval guard, idempotent decisions, single-use consumption, stale-pending retirement | `tests/unit/test_approval_lifecycle.py` |
+| Exactly-once execution under concurrent approved requests (in-memory) | `tests/unit/test_approval_concurrency.py` |
+| Approval decision endpoints: reviewer authz, own-scope reads, 404 not-found scoping, forged bodies, 409 conflicts | `tests/integration/test_approval_api.py` |
+| Structured logging: content-free access lines, request-id correlation/echo, content canaries, unknown level/format refuses startup | `tests/integration/test_logging.py` |
 | Audit structural privacy, pseudonymization, scoping | `tests/unit/test_audit_privacy.py`, `tests/integration/test_audit_api.py` |
 | Chat lifecycle, step budget, 413 size limit | `tests/integration/test_api.py`, adversarial suite |
-| Direct/indirect injection, impersonation, executor-bypass probes | `tests/adversarial/` |
-| PostgreSQL migrations, restart durability, approval transitions/idempotency, content-free columns | `tests/postgres/test_pg_lifecycle.py` |
-| Database failure denies mutating actions before the handler; read-only fallback is flagged; `/v1/audit` 503 | `tests/unit/test_persistence_fail_closed.py`, `tests/integration/test_db_unavailable.py` |
+| Direct/indirect injection, impersonation, executor-bypass probes, approval forging/replay/self-approval, log content canary | `tests/adversarial/` |
+| PostgreSQL migrations (head `0002_approval_consumed`), restart durability of consumed approvals, durable decision audit events, race-safe claim, approval transitions/idempotency, content-free columns | `tests/postgres/test_pg_lifecycle.py` |
+| Database failure denies mutating actions before the handler; approval lookup/claim failures deny; read-only fallback is flagged; `/v1/audit` 503 | `tests/unit/test_persistence_fail_closed.py`, `tests/integration/test_db_unavailable.py` |
 
-Current run: **173 passed, 0 skipped** with PostgreSQL running
-(163 of them need no database). Lint and format clean.
+Current run: **240 passed, 0 skipped** with PostgreSQL running (226 of them
+need no database; the 14 `postgres`-marked tests skip with an explicit reason
+when it is not). Lint and format clean.
 
 ## 2. What is NOT covered (untested attack classes)
 
 - Real network-level attacks (TLS, DNS, HTTP smuggling, replays by a
   network adversary).
-- Multi-user concurrency races beyond per-store locks; no load testing.
+- Multi-user concurrency races beyond per-store locks and the tested
+  single-approval claim race; no load testing.
 - A compromised or malicious **registered handler** (handlers are trusted
   code by assumption).
 - OS/process-level escape (RASP does not sandbox handlers).
@@ -59,17 +65,25 @@ Current run: **173 passed, 0 skipped** with PostgreSQL running
 
 - **Identity is development-only:** `X-Dev-Principal`/`X-Dev-Permissions`
   headers are forgeable by anyone who can reach the port. Never expose
-  this build beyond localhost. Production authentication is a Milestone 3
-  prerequisite.
+  this build beyond localhost. Real authentication remains the single
+  largest gap and a prerequisite for any deployment beyond localhost.
 - **Persistence is durable but local:** audit events, approvals, and policy
   metadata persist in PostgreSQL across restarts. `RASP_PERSISTENCE=in_memory`
   is an explicit opt-out that loses everything on restart. The shipped setup
   is a single unencrypted development instance (documented credentials, no
   TLS) — not a production database deployment.
-- **Approval workflow is partial:** pending creation + digest binding +
-  expiry exist and are tested; reviewer decision endpoints and reviewer
-  authorization are Milestone 3. Until then, no approved state can be
-  reached through the API — approvals can only be created and inspected.
+- **Approval workflow is single-use and enforced, but reviewer identity is
+  development-only.** Pending creation, digest binding, expiry, reviewer
+  decisions (approve/reject/revoke), separation of duties, idempotent
+  decisions, and single-use consumption (`approved → consumed`) all exist and
+  are tested. However, *who* a reviewer is still comes from the forgeable
+  `X-Dev-Permissions` header — so an attacker who can reach the port and set
+  `approvals:review` can decide on any request. Authorization here is only
+  meaningful once real authentication is in place.
+- **Logs are content-free by construction, but the sink is not controlled.**
+  RASP never logs prompts, arguments, or outputs, and there is no code path
+  that accepts content for logging. Where logs are shipped, retained, and who
+  can read them is a deployment responsibility; no log signing exists.
 - **Model adapter:** only the deterministic mock (`RASP_MODEL_PROVIDER=mock`)
   exists. Setting anything else refuses startup. Local adapter = M4.
 - **Single process, no rate limiting.** Do not deploy publicly.
@@ -89,7 +103,8 @@ Current run: **173 passed, 0 skipped** with PostgreSQL running
 - Local development only, synthetic data only.
 - No live public-service systems, no real personal records, no production
   credentials — and none are required to run the test suite.
-- Any use beyond localhost requires: real authentication (M3),
+- Any use beyond localhost requires: real authentication (prerequisite for
+  meaningful approval reviewer authorization),
   a hardened (encrypted, backed-up, access-controlled) database deployment,
   an adversarial evaluation report (M5), and an independent
   security/privacy review.

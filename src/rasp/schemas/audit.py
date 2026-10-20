@@ -22,6 +22,8 @@ class AuditEventType(StrEnum):
     POLICY_DECISION = "policy_decision"
     TOOL_EXECUTION = "tool_execution"
     APPROVAL_CREATED = "approval_created"
+    # Milestone 3: an authorized reviewer decided an approval request.
+    APPROVAL_DECIDED = "approval_decided"
     RESPONSE_SCREENED = "response_screened"
 
 
@@ -42,7 +44,7 @@ class AuditEvent(BaseModel):
     approval_id: str | None = None
 
     # execution_status values: not_applicable | not_executed | executed |
-    # failed | timeout | pending_approval | blocked
+    # failed | timeout | pending_approval | blocked | consumed
     execution_status: str = "not_applicable"
     duration_ms: float | None = None
     error_category: str | None = None  # sanitized category, never raw messages

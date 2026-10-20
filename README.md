@@ -2,7 +2,7 @@
 
 **Runtime security and authorization layer for LLM applications and tool-using AI agents.**
 
-> **Status: experimental prototype (v0.1.0, Milestone 2) — not production-certified.**
+> **Status: experimental prototype (v0.1.0, Milestone 3) — not production-certified.**
 > RASP is not a firewall replacement, a truth detector, or a guarantee against
 > prompt injection. See [Known Limitations](docs/LIMITATIONS.md) before relying
 > on any control described here.
@@ -27,8 +27,8 @@ approvals, and risk scores cannot override application-enforced permissions.
 | M0 | Repo baseline, architecture, threat model | ✅ done |
 | M1 | Mock model + registry + policy engine + executor + audit + tests | ✅ done |
 | M2 | PostgreSQL persistence (SQLAlchemy, Alembic) | ✅ done |
-| M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | ⏳ next |
-| M4 | Local LLM adapter | planned |
+| M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | ✅ done |
+| M4 | Local LLM adapter | ⏳ next |
 | M5 | Adversarial evaluation report with metrics | planned |
 | M6 | Controlled pilot preparation | planned |
 
@@ -37,11 +37,14 @@ policy engine (allow / deny / require_approval / allow_with_constraints),
 controlled executor with timeouts and output validation, PostgreSQL persistence
 for audit events, approvals and policy metadata (SQLAlchemy async + Alembic;
 `in_memory` remains an explicit opt-out), pseudonymized principals,
-digest-bound pending approvals with a validated state machine, body-size
-limits, development header identity, REST API, **173 automated tests**
-(including 10 that run against a real PostgreSQL instance).
+digest-bound approvals with a validated state machine and **single-use
+consumption**, reviewer decision endpoints (`approve`/`reject`/`revoke`) with
+separation of duties and scoped read access, idempotent decisions, structured
+JSON logging with request-id correlation, body-size limits, development header
+identity, REST API, **240 automated tests** (including 14 that run against a
+real PostgreSQL instance).
 
-**Planned (not implemented):** approval reviewer endpoints, local
+**Planned (not implemented):** local
 LLM adapter, rate limiting, real authentication, comparative evaluation harness.
 
 ## 3. Architecture and request lifecycle
@@ -53,7 +56,10 @@ Client ─► size-limit middleware ─► FastAPI gateway
         └ tool proposal ─► ControlledExecutor
                               ├─ DENY ──────────────► nothing executes (audited)
                               ├─ REQUIRE_APPROVAL ──► pending record (nothing executes)
-                              └─ ALLOW ─► constraints ─► timeout ─► registered handler
+                              │                        └ reviewer approves/rejects/revokes
+                              │                          (POST /v1/approvals/{id}/…)
+                              └─ ALLOW ─► claim approval (approved→consumed, single use)
+                                        ─► constraints ─► timeout ─► registered handler
                                         ─► output schema check ─► redaction ─► audit ─► model
 ```
 
@@ -66,7 +72,9 @@ invocation, argument smuggling, missing permissions, forged approvals,
 approval tampering/tampered arguments, executor bypass probes, policy
 weakening at startup, policy-engine crash (fail closed), handler failure
 and timeout, oversized payloads, audit access control, injection attempts
-whose *flags never substitute for authorization*.
+whose *flags never substitute for authorization*, plus (M3) self-approval,
+approval replay/double-execution, unauthorized approval access, and
+content leaking into logs.
 
 Explicitly **not** claimed: complete injection detection, tamper-proof
 audit, sandboxing of registered handlers, production authentication.
@@ -75,8 +83,10 @@ Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## 5. Features: implemented vs planned
 
 See status table in §2. Every "implemented" claim is covered by a test in
-`tests/` and was executed for this release (**173 passed**, including 10
-PostgreSQL-backed tests; 0 skipped when the database is running).
+`tests/` and was executed for this release (**240 passed**, including 14
+PostgreSQL-backed tests; 0 skipped when the database is running, and the
+PostgreSQL tests **skip with an explicit reason** — never silently — when it
+is not).
 
 ## 6. Supported model adapters
 
@@ -115,7 +125,9 @@ Copy-Item .env.example .env   # edit as needed; NEVER commit .env
 Key settings: `RASP_POLICY_PATH`, `RASP_MODEL_PROVIDER=mock`,
 `RASP_MAX_AGENT_STEPS`, `RASP_MAX_REQUEST_BYTES`, `RASP_DEV_AUTH_ENABLED`,
 `RASP_PERSISTENCE` (`postgres` default, or explicit `in_memory`),
-`RASP_DATABASE_URL` (default `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp`).
+`RASP_DATABASE_URL` (default `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp`),
+`RASP_LOG_LEVEL` / `RASP_LOG_FORMAT` (`json` default, or `text`; unknown
+values refuse startup).
 Full list: [.env.example](.env.example).
 
 ## 10. Database initialization and migrations
@@ -127,7 +139,7 @@ Alembic migrations.
 ```powershell
 docker compose up -d            # PostgreSQL 16 on host port 5433 + rasp_test DB
 uv run alembic upgrade head     # create/upgrade the schema (idempotent)
-uv run alembic current          # → 0001_initial (head)
+uv run alembic current          # → 0002_approval_consumed (head)
 ```
 
 Notes:
@@ -201,8 +213,36 @@ Invoke-WebRequest -Uri http://127.0.0.1:8000/v1/tools/execute -Method Post `
 ```
 
 Endpoints: `POST /v1/chat`, `POST /v1/tools/execute`, `GET /v1/tools`,
-`GET /v1/audit` (needs `audit:read`), `GET /v1/health`.
-Approval *decision* endpoints arrive in Milestone 3 (planned).
+`GET /v1/audit` (needs `audit:read`), `GET /v1/health`, and the Milestone 3
+approval decision API:
+`GET /v1/approvals` (needs `approvals:read`; own scope unless
+`approvals:review`), `GET /v1/approvals/{id}`,
+`POST /v1/approvals/{id}/approve|reject|revoke` (needs `approvals:review`).
+
+**Approval lifecycle (M3):**
+
+```powershell
+# The requester parks an approval-gated action (202, nothing executed):
+$pending = Invoke-WebRequest -Uri http://127.0.0.1:8000/v1/tools/execute -Method Post `
+  -Headers $requester -ContentType "application/json" `
+  -Body '{"tool_id":"publish_announcement","arguments":{"title":"Lab open","body":"Synthetic"}}'
+$id = ($pending.Content | ConvertFrom-Json).approval_id
+
+# A DIFFERENT principal with approvals:review approves it
+# (a requester can never approve their own request → 403 self_review_forbidden):
+Invoke-WebRequest -Uri "http://127.0.0.1:8000/v1/approvals/$id/approve" -Method Post `
+  -Headers $reviewer          # → 200, status "approved"
+
+# Re-submitting the identical action now executes it EXACTLY once,
+# consuming the approval (approved → consumed):
+Invoke-WebRequest -Uri http://127.0.0.1:8000/v1/tools/execute -Method Post `
+  -Headers $requester -ContentType "application/json" `
+  -Body '{"tool_id":"publish_announcement","arguments":{"title":"Lab open","body":"Synthetic"}}'
+# → 200 executed
+
+# Replaying the same action never re-executes: it opens a FRESH approval cycle.
+# → 202 with a new approval_id
+```
 
 ## 13. Mock-model demonstration
 
@@ -244,9 +284,9 @@ permission → approval → allow. A deny at any step is final.
 ## 15. Running automated tests (verified)
 
 ```powershell
-uv run pytest                  # full suite: 173 passed (with PostgreSQL running)
-uv run pytest -m "not postgres"  # 163 passed — no database required
-uv run pytest -m postgres        # 10 passed against rasp_test
+uv run pytest                  # full suite: 240 passed (with PostgreSQL running)
+uv run pytest -m "not postgres"  # 226 passed / 14 skipped — no database required
+uv run pytest -m postgres        # 14 passed against rasp_test
 uv run pytest tests/unit
 uv run pytest tests/integration
 uv run pytest tests/adversarial
@@ -268,6 +308,15 @@ against any database name lacking "test".
 - Fail closed: policy errors deny sensitive actions and are audited.
 - Audit events are structurally **content-free** (no prompts, arguments,
   or outputs — schema guarantee) with salted pseudonymized principals.
+- Approvals are digest-bound to the exact action and **single-use**: an
+  approval authorizes exactly one execution and is atomically consumed by it.
+  Replaying the action never re-executes it.
+- **Separation of duties:** a requester can never approve their own request
+  (`403 self_review_forbidden`); fail-closed withdrawals (reject/revoke) remain
+  available to withdraw authority.
+- Structured logs are content-free (identifiers, decisions, reason codes only)
+  and carry a request id shared with the audit trail. There is no API that
+  accepts prompt/argument/output text for logging.
 - Known secret shapes are redacted from tool output and final responses.
 - Development identity uses request headers and is **forgeable** — local
   prototype only; real authentication is a prerequisite for any shared use.
@@ -291,8 +340,8 @@ against any database name lacking "test".
 Summarized: development-only identity; PostgreSQL fails closed but is a
 single unencrypted instance (no HA/signing, `in_memory` remains an opt-out);
 pattern-based injection/secret detection is incomplete; no rate limiting; no
-local LLM yet; approval decisions not yet reachable through the API
-(pending-only); single-process prototype.
+local LLM yet; approval reviewer authz rests on the same forgeable dev
+headers until production authentication lands; single-process prototype.
 Full list: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ## 19. Security vulnerability reporting

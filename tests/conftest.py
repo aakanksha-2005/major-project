@@ -21,9 +21,12 @@ from rasp.tools import builtin
 
 # Convenience permission bundles for the development identity mechanism.
 PERMS_ALL_DEMO = (
-    "system:status,documents:read,applications:preview,announcements:publish,audit:read"
+    "system:status,documents:read,applications:preview,announcements:publish,"
+    "audit:read,approvals:read"
 )
 PERMS_AUDIT_ADMIN = PERMS_ALL_DEMO + ",audit:admin"
+# A reviewer can see all approval records and decide on them.
+PERMS_APPROVER = PERMS_ALL_DEMO + ",approvals:review"
 
 
 def headers_for(principal: str, perms: str = "") -> dict[str, str]:

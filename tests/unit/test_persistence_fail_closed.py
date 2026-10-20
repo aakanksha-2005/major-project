@@ -8,7 +8,7 @@ the default suite without PostgreSQL.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -19,11 +19,13 @@ from rasp.container import builtin_tool_definitions
 from rasp.executor.executor import ControlledExecutor
 from rasp.policy.config import ToolPolicy, load_policy_file
 from rasp.policy.engine import PolicyEngine
+from rasp.schemas.approval import ApprovalRecord, ApprovalStatus, compute_action_digest
 from rasp.schemas.audit import AuditEvent, AuditEventType
 from rasp.schemas.model import ToolProposal
 from rasp.schemas.policy import DecisionOutcome, ReasonCode
 from rasp.schemas.tool import RiskLevel, ToolDefinition
 from rasp.settings import Settings
+from rasp.tools import builtin
 from rasp.tools.registry import ToolRegistry
 
 PERMS = frozenset({"system:status", "documents:read", "announcements:publish", "test:mutating"})
@@ -49,10 +51,16 @@ class FailingApprovalBackend(ApprovalBackend):
     async def get_or_expire(self, approval_id, now):  # noqa: ANN001, ANN201
         raise ConnectionError("database unavailable (test double)")
 
+    async def find_for_action(self, action_digest, principal_ref, tool_id, now):  # noqa: ANN001, ANN201
+        raise ConnectionError("database unavailable (test double)")
+
     async def all(self):  # noqa: ANN201
         raise ConnectionError("database unavailable (test double)")
 
     async def save_status(self, record, *, expected_status):  # noqa: ANN201
+        raise ConnectionError("database unavailable (test double)")
+
+    async def claim(self, approval_id, now):  # noqa: ANN001, ANN201
         raise ConnectionError("database unavailable (test double)")
 
 
@@ -141,6 +149,86 @@ async def test_approval_creation_failure_denies_instead_of_parking(stack):
     assert outcome.decision.reason_code == ReasonCode.PERSISTENCE_ERROR
     assert outcome.approval_id is None
     assert stack.calls == []
+
+
+async def test_approval_lookup_failure_denies_instead_of_parking(stack):
+    """If the approval state cannot be read, the action is denied (fail closed).
+
+    The lookup happens before parking: an unknowable approval state must never
+    be treated as 'no approval exists'.
+    """
+    outcome = await stack.run("publish_announcement", {"title": "t", "body": "b"})
+    assert outcome.decision.outcome == DecisionOutcome.DENY
+    assert outcome.decision.reason_code == ReasonCode.PERSISTENCE_ERROR
+    assert stack.calls == []
+
+
+class _ClaimFailBackend(ApprovalBackend):
+    """Reads succeed (so an approved record is found) but the atomic claim
+    fails as if the database dropped between lookup and consumption."""
+
+    def __init__(self) -> None:
+        self.inner = ApprovalStore(ttl_seconds=60).backend
+
+    async def create(self, record):
+        return await self.inner.create(record)
+
+    async def get_or_expire(self, approval_id, now):
+        return await self.inner.get_or_expire(approval_id, now)
+
+    async def find_for_action(self, action_digest, principal_ref, tool_id, now):
+        return await self.inner.find_for_action(action_digest, principal_ref, tool_id, now)
+
+    async def all(self):
+        return await self.inner.all()
+
+    async def save_status(self, record, *, expected_status):
+        return await self.inner.save_status(record, expected_status=expected_status)
+
+    async def claim(self, approval_id, now):
+        raise ConnectionError("database unavailable at claim time (test double)")
+
+
+async def test_claim_failure_after_approval_denies_without_executing():
+    """A DB outage at claim time denies and never reaches the handler."""
+    registry = ToolRegistry()
+    for definition in builtin_tool_definitions():
+        registry.register(definition)
+    config = load_policy_file("config/policies.example.yaml")
+    engine = PolicyEngine(config, registry)
+    approvals = ApprovalStore(ttl_seconds=60, backend=_ClaimFailBackend())
+    # A WORKING audit store: this test isolates the claim-time failure.
+    audit = AuditService(Settings(persistence="in_memory"))
+    executor = ControlledExecutor(
+        registry=registry, engine=engine, approvals=approvals, audit=audit
+    )
+    principal = Principal(principal_id="claim-fail", permissions=PERMS)
+
+    # Seed an approved record through the real in-memory backend.
+    digest = compute_action_digest(
+        "publish_announcement", {"title": "t", "body": "b"}, "claim-fail", "1.0"
+    )
+    record = await approvals.backend.inner.create(
+        ApprovalRecord(
+            request_id="r",
+            principal_ref=audit.principal_ref("claim-fail"),
+            tool_id="publish_announcement",
+            action_digest=digest,
+            policy_version="1.0",
+            status=ApprovalStatus.APPROVED,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+    )
+
+    outcome = await executor.execute(
+        ToolProposal(tool_id="publish_announcement", arguments={"title": "t", "body": "b"}),
+        principal=principal,
+        request_id="req-claim-fail",
+    )
+    assert outcome.decision.outcome == DecisionOutcome.DENY
+    assert outcome.decision.reason_code == ReasonCode.PERSISTENCE_ERROR
+    assert builtin.EXECUTION_LOG == []  # handler never reached
+    assert record.approval_id  # the approved record existed
 
 
 async def test_deny_still_denies_when_persistence_is_down(stack):

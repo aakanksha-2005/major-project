@@ -31,7 +31,7 @@ Bash equivalent: `scripts/run_dev.sh`.
 ## 3. Quality gates (run before every commit)
 
 ```powershell
-uv run pytest                 # full suite (needs PostgreSQL for the last 10)
+uv run pytest                 # full suite (needs PostgreSQL for the last 14)
 uv run pytest -m "not postgres"  # everything that runs without a database
 uv run pytest -m postgres     # isolated rasp_test database only
 uv run ruff check src tests migrations   # lint
@@ -64,6 +64,8 @@ security-relevant settings:
 | `RASP_DATABASE_URL` | `postgresql+asyncpg://rasp:rasp@127.0.0.1:5433/rasp` | never commit real credentials |
 | `RASP_DATABASE_STATEMENT_TIMEOUT_MS` | `5000` | hung queries become denials |
 | `RASP_DATABASE_POOL_SIZE` / `_POOL_TIMEOUT` | `5` / `5.0` | asyncpg pool sizing |
+| `RASP_LOG_LEVEL` | `INFO` | unknown values refuse startup |
+| `RASP_LOG_FORMAT` | `json` | `json` or `text`; unknown values refuse startup |
 
 ## 5. Identity headers (development only)
 
@@ -83,8 +85,13 @@ Missing headers ⇒ zero permissions ⇒ everything sensitive is denied
 3. New tools require: registry definition + policy entry + schema +
    tests (positive and negative). Startup refuses mismatches.
 4. Security fixes require a regression test in the same change.
-5. Audit events must never gain content fields (prompt/args/outputs).
+5. Audit events must never gain content fields (prompt/args/outputs). The
+   same rule applies to logs: log identifiers, decisions, and reason codes —
+   never content. There is deliberately no log API that accepts content.
 6. Deny paths must fail closed; no "just this once" fallbacks.
+7. Approval decisions require separation of duties (requester ≠ approver) and
+   single-use consumption (claim before execute); never introduce a path that
+   reaches a handler on an approved action without claiming the record first.
 
 ## 7. Adding a tool (checklist)
 
@@ -100,15 +107,21 @@ Missing headers ⇒ zero permissions ⇒ everything sensitive is denied
 ## 8. Testing strategy
 
 - **Unit** — components in isolation (engine, registry, executor with
-  counter handlers, approval digests/state machine, audit/redaction,
-  fail-closed persistence doubles).
+  counter handlers, approval digests/state machine/lifecycle/claim,
+  approval concurrency, audit/redaction, logging formatter, fail-closed
+  persistence doubles).
 - **Integration** — full ASGI app via httpx; no network, no DB, no keys.
-  Includes an unreachable-database suite proving handlers are never reached.
+  Includes an unreachable-database suite proving handlers are never reached,
+  the approval decision API (authz, scoping, idempotency, forging), and the
+  structured-logging content canaries.
 - **Adversarial** — injection, impersonation, tampering, bypass, size
-  limits; every assertion proves enforcement or flags the gap honestly.
+  limits, approval forging/replay/self-approval, log content; every assertion
+  proves enforcement or flags the gap honestly.
 - **PostgreSQL** (`tests/postgres/`, marker `postgres`) — real database:
-  clean migration state, restart durability, approval transitions,
-  duplicate-pending idempotency, audit scoping, content-free storage.
+  clean migration state (head `0002_approval_consumed`), restart durability
+  (incl. consumed approvals), approval transitions, race-safe claim,
+  duplicate-pending idempotency, durable decision audit events, audit scoping,
+  content-free storage.
 - The default suite forces `RASP_PERSISTENCE=in_memory` (see
   `tests/conftest.py`) so it stays runnable without infrastructure.
 - PostgreSQL tests **skip with an explicit reason** when unreachable — never

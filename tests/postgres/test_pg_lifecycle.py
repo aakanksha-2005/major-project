@@ -16,8 +16,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 from rasp.main import create_app
-from rasp.schemas.approval import ApprovalStatus
-from tests.conftest import PERMS_ALL_DEMO, PERMS_AUDIT_ADMIN, headers_for
+from rasp.schemas.approval import ApprovalRecord, ApprovalStatus
+from tests.conftest import PERMS_ALL_DEMO, PERMS_APPROVER, PERMS_AUDIT_ADMIN, headers_for
 
 pytestmark = pytest.mark.postgres
 
@@ -39,8 +39,19 @@ async def test_clean_database_initialized_from_migrations(pg_engine):
             )
         }
         version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+        columns = {
+            row[0]
+            for row in await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'approval_requests'"
+                )
+            )
+        }
     assert {"policies", "approval_requests", "audit_events"} <= tables
-    assert version == "0001_initial"
+    # Milestone 3 head: adds single-use consumption.
+    assert version == "0002_approval_consumed"
+    assert "consumed_at" in columns
 
 
 async def test_audit_table_has_no_content_columns(pg_engine):
@@ -287,8 +298,213 @@ async def test_audit_records_scoped_to_own_principal_in_database(pg_settings):
         await app.state.container.close()
 
 
-async def test_no_http_surface_exists_for_approval_records(pg_client):
-    """Approval records are not exposed by any route in M2 (decision API = M3)."""
-    for path in ("/v1/approvals", "/v1/approvals/all", "/v1/review"):
+async def test_approval_records_require_permission_over_http(pg_client):
+    """Milestone 3: approval records have an API surface — but default deny.
+
+    A caller without `approvals:read` cannot list or fetch records; unknown
+    ids never leak existence. (M2 asserted no surface existed at all; the
+    decision API is exactly what M3 adds.)
+    """
+    # audit:admin does NOT imply approvals:read (default deny).
+    listing = await pg_client.get(
+        "/v1/approvals", headers=headers_for("probe", "audit:read,audit:admin")
+    )
+    assert listing.status_code == 403
+    assert listing.json()["error"]["code"] == "forbidden"
+
+    single = await pg_client.get(
+        "/v1/approvals/does-not-exist", headers=headers_for("probe", "audit:read")
+    )
+    assert single.status_code == 403
+
+    # Still-unknown routes stay 404.
+    for path in ("/v1/approvals/all", "/v1/review"):
         response = await pg_client.get(path, headers=headers_for("probe", PERMS_AUDIT_ADMIN))
         assert response.status_code == 404, path
+
+
+# --- Milestone 3: consumption, decisions, and durable single-use --------------------
+
+
+async def test_approved_action_executes_once_and_consumption_is_durable(pg_settings, pg_engine):
+    """The full lifecycle against the real database.
+
+    propose -> reviewer approves -> action executes once -> the approval is
+    CONSUMED (durably, with consumed_at) -> replay re-parks without executing.
+    """
+    from rasp.tools import builtin
+
+    builtin.EXECUTION_LOG.clear()
+    try:
+        app = create_app(pg_settings)
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+                proposed = await client.post(
+                    "/v1/tools/execute",
+                    json={
+                        "tool_id": "publish_announcement",
+                        "arguments": {"title": "dbconsumed", "body": "b"},
+                    },
+                    headers=headers_for("db-requester", PERMS_ALL_DEMO),
+                )
+                assert proposed.status_code == 202
+                approval_id = proposed.json()["approval_id"]
+
+                # Self-approval is forbidden even with reviewer rights.
+                forbidden = await client.post(
+                    f"/v1/approvals/{approval_id}/approve",
+                    headers=headers_for("db-requester", PERMS_APPROVER),
+                )
+                assert forbidden.status_code == 403
+                assert forbidden.json()["error"]["code"] == "self_review_forbidden"
+
+                decided = await client.post(
+                    f"/v1/approvals/{approval_id}/approve",
+                    headers=headers_for("db-reviewer", PERMS_APPROVER),
+                )
+                assert decided.status_code == 200
+                assert decided.json()["approval"]["status"] == "approved"
+
+                executed = await client.post(
+                    "/v1/tools/execute",
+                    json={
+                        "tool_id": "publish_announcement",
+                        "arguments": {"title": "dbconsumed", "body": "b"},
+                    },
+                    headers=headers_for("db-requester", PERMS_ALL_DEMO),
+                )
+                assert executed.status_code == 200
+                assert builtin.EXECUTION_LOG == ["publish_announcement:dbconsumed"]
+
+                replay = await client.post(
+                    "/v1/tools/execute",
+                    json={
+                        "tool_id": "publish_announcement",
+                        "arguments": {"title": "dbconsumed", "body": "b"},
+                    },
+                    headers=headers_for("db-requester", PERMS_ALL_DEMO),
+                )
+                assert replay.status_code == 202
+                assert replay.json()["approval_id"] != approval_id
+        finally:
+            await app.state.container.close()
+    finally:
+        builtin.EXECUTION_LOG.clear()
+
+    # Durable consumption: the row itself records the terminal state.
+    async with pg_engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, consumed_at FROM approval_requests WHERE approval_id = :aid"),
+                {"aid": approval_id},
+            )
+        ).one()
+    assert row[0] == "consumed"
+    assert row[1] is not None
+
+
+async def test_consumed_status_survives_restart(pg_settings):
+    """A consumed approval stays consumed across an application restart."""
+    app1 = create_app(pg_settings)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app1), base_url="http://t") as c1:
+            proposed = await c1.post(
+                "/v1/tools/execute",
+                json={"tool_id": "publish_announcement", "arguments": {"title": "r", "body": "b"}},
+                headers=headers_for("restart-consumer", PERMS_ALL_DEMO),
+            )
+            approval_id = proposed.json()["approval_id"]
+            store = app1.state.container.approvals
+            await store.decide(approval_id, "approve", reviewer_ref="pid_reviewer")
+            consumed = await store.claim(approval_id)
+            assert consumed.status == ApprovalStatus.CONSUMED
+    finally:
+        await app1.state.container.close()
+
+    app2 = create_app(pg_settings)
+    try:
+        record = await app2.state.container.approvals.get(approval_id)
+        assert record is not None
+        assert record.status == ApprovalStatus.CONSUMED
+        assert record.consumed_at is not None
+    finally:
+        await app2.state.container.close()
+
+
+async def test_claim_is_race_safe_in_the_database(pg_settings):
+    """Concurrent claims of one approved record: exactly one succeeds."""
+    import asyncio
+
+    from rasp.approvals.store import InvalidApprovalTransition
+
+    app = create_app(pg_settings)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            proposed = await client.post(
+                "/v1/tools/execute",
+                json={
+                    "tool_id": "publish_announcement",
+                    "arguments": {"title": "race", "body": "b"},
+                },
+                headers=headers_for("race-db", PERMS_ALL_DEMO),
+            )
+        approval_id = proposed.json()["approval_id"]
+        store = app.state.container.approvals
+        await store.decide(approval_id, "approve", reviewer_ref="pid_reviewer")
+
+        results = await asyncio.gather(
+            *(store.claim(approval_id) for _ in range(6)),
+            return_exceptions=True,
+        )
+        successes = [r for r in results if isinstance(r, ApprovalRecord)]
+        failures = [r for r in results if isinstance(r, InvalidApprovalTransition)]
+        assert len(successes) == 1
+        assert len(failures) == 5
+    finally:
+        await app.state.container.close()
+
+
+async def test_decision_endpoints_persist_audit_event(pg_settings, pg_engine):
+    """A reviewer decision emits a content-free APPROVAL_DECIDED audit event."""
+    app = create_app(pg_settings)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            proposed = await client.post(
+                "/v1/tools/execute",
+                json={
+                    "tool_id": "publish_announcement",
+                    "arguments": {"title": "aud", "body": "b"},
+                },
+                headers=headers_for("audit-requester", PERMS_ALL_DEMO),
+            )
+            approval_id = proposed.json()["approval_id"]
+            decided = await client.post(
+                f"/v1/approvals/{approval_id}/reject",
+                headers=headers_for("audit-reviewer", PERMS_APPROVER),
+            )
+            assert decided.status_code == 200
+            decision_request_id = decided.json()["request_id"]
+    finally:
+        await app.state.container.close()
+
+    async with pg_engine.connect() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT event_type, decision, reason_code, approval_id, tool_id "
+                        "FROM audit_events WHERE request_id = :rid"
+                    ),
+                    {"rid": decision_request_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert len(rows) == 1
+    event = rows[0]
+    assert event["event_type"] == "approval_decided"
+    assert event["decision"] == "deny"
+    assert event["reason_code"] == "approval_rejected"
+    assert event["approval_id"] == approval_id
+    assert event["tool_id"] == "publish_announcement"

@@ -18,6 +18,7 @@ from rasp.api import (
     register_routes,
 )
 from rasp.container import build_container
+from rasp.observability import RequestIdMiddleware, configure_logging
 from rasp.settings import Settings, load_settings
 
 logger = logging.getLogger("rasp")
@@ -39,6 +40,8 @@ This is NOT production authentication.
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    # Unknown log level/format refuses startup (no silent fallback).
+    configure_logging(level=settings.log_level, log_format=settings.log_format)
     container = build_container(settings)  # raises on invalid policy
 
     app = FastAPI(
@@ -48,6 +51,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.container = container
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+    # Outermost: establishes the request id used by every log line.
+    app.add_middleware(RequestIdMiddleware)
     register_exception_handlers(app)
     register_routes(app)
 

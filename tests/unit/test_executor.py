@@ -24,6 +24,7 @@ from rasp.schemas.model import ToolProposal
 from rasp.schemas.policy import DecisionOutcome, ReasonCode
 from rasp.schemas.tool import RiskLevel, ToolDefinition
 from rasp.settings import Settings
+from rasp.tools import builtin
 from rasp.tools.registry import ToolRegistry
 
 PERMS_FULL = frozenset(
@@ -291,43 +292,60 @@ async def test_approval_required_creates_pending_and_does_not_execute(stack):
     assert stored is not None and stored.status == ApprovalStatus.PENDING
 
 
-async def test_approved_exact_action_executes(stack):
-    args = {"title": "t", "body": "b"}
-    # Simulate an authorized reviewer approving this exact action.
-    digest = compute_action_digest(
-        "publish_announcement", args, stack.principal.principal_id, stack.config.version
-    )
-    now = datetime.now(UTC)
-    from rasp.schemas.approval import ApprovalRecord
+async def test_approved_exact_action_executes_and_is_consumed(stack):
+    """Milestone 3: an approved exact action executes exactly once.
 
-    approval = ApprovalRecord(
-        request_id="req-review",
-        principal_ref=stack.principal.principal_id,
-        tool_id="publish_announcement",
-        action_digest=digest,
-        policy_version=stack.config.version,
-        status=ApprovalStatus.APPROVED,
-        created_at=now,
-        expires_at=now + timedelta(minutes=5),
+    The full loop: propose -> pending -> reviewer approves -> the SAME
+    action executes, and the approval is consumed (single use).
+    """
+    args = {"title": "t", "body": "b"}
+
+    # 1. Propose: parks on a fresh pending approval, nothing executes.
+    first = await stack.run("publish_announcement", args)
+    assert first.decision.outcome == DecisionOutcome.REQUIRE_APPROVAL
+    approval_id = first.approval_id
+    assert approval_id
+    assert builtin.EXECUTION_LOG == []
+
+    # 2. A different principal ("reviewer-1") approves it — a requester can
+    #    never approve their own request.
+    reviewer_ref = "reviewer-1"
+    approved = await stack.approvals.decide(approval_id, "approve", reviewer_ref=reviewer_ref)
+    assert approved.status == ApprovalStatus.APPROVED
+
+    # 3. Re-proposing the identical action now executes it.
+    outcome = await stack.run("publish_announcement", args)
+    assert outcome.decision.outcome in (
+        DecisionOutcome.ALLOW,
+        DecisionOutcome.ALLOW_WITH_CONSTRAINTS,
     )
-    outcome = await stack.executor.execute(
-        ToolProposal(tool_id="publish_announcement", arguments=args),
-        principal=stack.principal,
-        request_id="req-exec-approved",
-        # approval path: engine receives it through evaluate() — executor
-        # always starts with approval=None, so drive the engine directly:
-    )
-    # Executor proposes pending (no approval context in M1 API path):
-    assert outcome.decision.outcome == DecisionOutcome.REQUIRE_APPROVAL
-    # Direct engine check proves a valid approval would authorize exactly this.
-    decision = stack.engine.evaluate(
-        tool_id="publish_announcement",
-        arguments=args,
-        principal=stack.principal,
-        approval=approval,
-    )
-    assert decision.outcome == DecisionOutcome.ALLOW
-    assert "publish_announcement:t" not in stack.calls
+    assert outcome.result.status == ExecutionStatus.EXECUTED
+    assert builtin.EXECUTION_LOG == ["publish_announcement:t"]
+    # The approval was consumed exactly once.
+    consumed = await stack.approvals.get(approval_id)
+    assert consumed is not None and consumed.status == ApprovalStatus.CONSUMED
+    assert consumed.consumed_at is not None
+
+    # 4. Replaying the SAME action never re-executes: it opens a fresh
+    #    approval cycle (new approval id, still pending).
+    replay = await stack.run("publish_announcement", args)
+    assert replay.decision.outcome == DecisionOutcome.REQUIRE_APPROVAL
+    assert replay.approval_id != approval_id
+    assert builtin.EXECUTION_LOG == ["publish_announcement:t"]
+
+
+async def test_revoked_approval_never_executes(stack):
+    """Revocation (approved -> invalidated) blocks execution fail-closed."""
+    args = {"title": "rev", "body": "b"}
+    first = await stack.run("publish_announcement", args)
+    approval_id = first.approval_id
+    await stack.approvals.decide(approval_id, "approve", reviewer_ref="reviewer-2")
+    await stack.approvals.decide(approval_id, "revoke", reviewer_ref="reviewer-2")
+
+    outcome = await stack.run("publish_announcement", args)
+    assert outcome.decision.outcome == DecisionOutcome.DENY
+    assert outcome.decision.reason_code == ReasonCode.APPROVAL_INVALID
+    assert builtin.EXECUTION_LOG == []  # handler never reached
 
 
 async def test_tampered_action_with_still_valid_looking_approval_denied(stack):

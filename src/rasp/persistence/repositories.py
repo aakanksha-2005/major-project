@@ -113,6 +113,20 @@ class PostgresApprovalStore:
     async def create(self, record: ApprovalRecord) -> ApprovalRecord:
         # Approval rows carry a foreign key to policies — metadata first.
         await self._policy.ensure_persisted(record.policy_version)
+        # Retire any matching stale pending first so a fresh approval window
+        # can open (the partial unique index would otherwise keep pointing at
+        # an already-expired request).
+        expire_stale = (
+            update(ApprovalRow)
+            .where(
+                ApprovalRow.action_digest == record.action_digest,
+                ApprovalRow.principal_ref == record.principal_ref,
+                ApprovalRow.tool_id == record.tool_id,
+                ApprovalRow.status == "pending",
+                ApprovalRow.expires_at <= record.created_at,
+            )
+            .values(status="expired")
+        )
         stmt = (
             pg_insert(ApprovalRow)
             .values(**_approval_to_row_values(record))
@@ -127,6 +141,7 @@ class PostgresApprovalStore:
         )
         try:
             async with self._db.session() as session:
+                await session.execute(expire_stale)
                 await session.execute(stmt)
         except IntegrityError:
             # Concurrent duplicate: the partial unique index won. The
@@ -173,6 +188,78 @@ class PostgresApprovalStore:
             rows = (await session.execute(stmt)).scalars().all()
         return [_row_to_approval(row) for row in rows]
 
+    async def find_for_action(
+        self, action_digest: str, principal_ref: str, tool_id: str, now: datetime
+    ) -> ApprovalRecord | None:
+        # Lazily retire a stale pending for this action so the returned state
+        # reflects reality (and a fresh window can be opened afterwards).
+        expire_stale = (
+            update(ApprovalRow)
+            .where(
+                ApprovalRow.action_digest == action_digest,
+                ApprovalRow.principal_ref == principal_ref,
+                ApprovalRow.tool_id == tool_id,
+                ApprovalRow.status == "pending",
+                ApprovalRow.expires_at <= now,
+            )
+            .values(status="expired")
+        )
+        stmt = (
+            select(ApprovalRow)
+            .where(
+                ApprovalRow.action_digest == action_digest,
+                ApprovalRow.principal_ref == principal_ref,
+                ApprovalRow.tool_id == tool_id,
+            )
+            .order_by(ApprovalRow.created_at.desc())
+        )
+        async with self._db.session() as session:
+            await session.execute(expire_stale)
+            rows = (await session.execute(stmt)).scalars().all()
+        records = [_row_to_approval(row) for row in rows]
+        if not records:
+            return None
+        # Prefer a live pending, then an approved record, else newest terminal.
+        for status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+            for record in records:
+                if record.status == status:
+                    return record
+        return records[0]  # newest-first ordering
+
+    async def claim(self, approval_id: str, now: datetime) -> ApprovalRecord:
+        """Atomic single-use consumption: UPDATE ... WHERE status='approved'.
+
+        The row-level guard makes this race-safe: concurrent executors of the
+        same approved action cannot both win.
+        """
+        stmt = (
+            update(ApprovalRow)
+            .where(
+                ApprovalRow.approval_id == approval_id,
+                ApprovalRow.status == ApprovalStatus.APPROVED.value,
+            )
+            .values(status=ApprovalStatus.CONSUMED.value, consumed_at=now)
+        )
+        async with self._db.session() as session:
+            result = await session.execute(stmt)
+            if result.rowcount == 0:
+                current = (
+                    await session.execute(
+                        select(ApprovalRow).where(ApprovalRow.approval_id == approval_id)
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise ApprovalNotFoundError(approval_id)
+                raise InvalidApprovalTransition(
+                    ApprovalStatus(current.status), ApprovalStatus.CONSUMED
+                )
+            row = (
+                await session.execute(
+                    select(ApprovalRow).where(ApprovalRow.approval_id == approval_id)
+                )
+            ).scalar_one()
+        return _row_to_approval(row)
+
     async def save_status(
         self, record: ApprovalRecord, *, expected_status: ApprovalStatus
     ) -> ApprovalRecord:
@@ -186,6 +273,7 @@ class PostgresApprovalStore:
                 status=record.status.value,
                 reviewer_ref=record.reviewer_ref,
                 decided_at=record.decided_at,
+                consumed_at=record.consumed_at,
             )
         )
         async with self._db.session() as session:
@@ -263,6 +351,7 @@ def _approval_to_row_values(record: ApprovalRecord) -> dict:
         "created_at": record.created_at,
         "expires_at": record.expires_at,
         "decided_at": record.decided_at,
+        "consumed_at": record.consumed_at,
     }
 
 
@@ -279,6 +368,7 @@ def _row_to_approval(row: ApprovalRow) -> ApprovalRecord:
         created_at=row.created_at,
         expires_at=row.expires_at,
         decided_at=row.decided_at,
+        consumed_at=row.consumed_at,
     )
 
 
