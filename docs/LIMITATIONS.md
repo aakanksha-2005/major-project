@@ -1,4 +1,4 @@
-# RASP — Known Limitations (v0.1, Milestone 4)
+# RASP — Known Limitations (v0.1, Milestone 5)
 
 Honest disclosure of what is and is not covered. Updated per milestone.
 
@@ -24,10 +24,15 @@ Honest disclosure of what is and is not covered. Updated per milestone.
 | Hostile local-model output (tool calls, smuggled arguments, authority claims, malformed JSON) cannot bypass enforcement | `tests/adversarial/test_local_model_adversarial.py` |
 | PostgreSQL migrations (head `0002_approval_consumed`), restart durability of consumed approvals, durable decision audit events, race-safe claim, approval transitions/idempotency, content-free columns | `tests/postgres/test_pg_lifecycle.py` |
 | Database failure denies mutating actions before the handler; approval lookup/claim failures deny; read-only fallback is flagged; `/v1/audit` 503 | `tests/unit/test_persistence_fail_closed.py`, `tests/integration/test_db_unavailable.py` |
+| Adversarial evaluation harness: corpus runs the real pipeline, scores prevention/containment, regenerates the committed report, and the tester itself is tested (broken cases must fail) | `tests/evaluation/test_evaluation_harness.py`, `docs/ADVERSARIAL_EVALUATION.md` |
 
-Current run: **277 passed, 0 skipped** with PostgreSQL running (263 of them
+Current run: **289 passed, 0 skipped** with PostgreSQL running (275 of them
 need no database; the 14 `postgres`-marked tests skip with an explicit reason
 when it is not). Lint and format clean.
+
+The M5 adversarial evaluation harness scores **16/16 cases prevented, 0 false
+allows, 0 false denies**. This measures whether *RASP's enforcement layer*
+contains a declared attack; see §2 for what it does not measure.
 
 ## 2. What is NOT covered (untested attack classes)
 
@@ -38,11 +43,15 @@ when it is not). Lint and format clean.
 - A compromised or malicious **registered handler** (handlers are trusted
   code by assumption).
 - OS/process-level escape (RASP does not sandbox handlers).
-- Real LLM misbehavior: adapter *plumbing* is tested offline, but no
-  comparative evaluation of an actual local model's safety behavior has been
-  run (that is the Milestone 5 adversarial evaluation report). A local model
-  can and will propose unsafe tool calls; RASP denies them by policy, but how
-  *often* a given model does so is not yet measured.
+- Real LLM misbehavior: adapter *plumbing* is tested offline, and the M5
+  harness measures whether RASP's enforcement contains a corpus of declared
+  attacks. It does **not** measure a real local model's propensity to attempt
+  attacks — no comparative, live-model evaluation of safety behavior has been
+  run. A local model can and will propose unsafe tool calls; RASP denies them
+  by policy, but how *often* a given model does so is not measured here.
+- The M5 corpus is hand-written and finite. A 100% prevention rate means those
+  cases were contained, not that unlisted attacks would be; novel attack
+  shapes are not covered.
 - Rate limiting and fair-use abuse (not implemented yet).
 - Audit tamper resistance: no signatures, hash chain, or external
   immutability. Events are durable in PostgreSQL, but anyone with database
@@ -115,5 +124,6 @@ when it is not). Lint and format clean.
 - Any use beyond localhost requires: real authentication (prerequisite for
   meaningful approval reviewer authorization),
   a hardened (encrypted, backed-up, access-controlled) database deployment,
-  an adversarial evaluation report (M5), and an independent
+  a *live*, comparative model-safety evaluation (the M5 harness covers
+  RASP enforcement, not model behavior), and an independent
   security/privacy review.

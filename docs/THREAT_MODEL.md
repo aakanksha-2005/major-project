@@ -1,10 +1,11 @@
 # RASP — Threat Model
 
-**Status:** Milestone 4 · **Not production-certified**
-Scope: the Milestone 4 prototype (mock **and local LLM** adapters, synthetic
+**Status:** Milestone 5 · **Not production-certified**
+Scope: the Milestone 5 prototype (mock **and local LLM** adapters, synthetic
 tools, PostgreSQL persistence with explicit `in_memory` opt-out, development
-identity, approval decision API, structured logging). Later milestones change
-the surface and require this document to be updated.
+identity, approval decision API, structured logging, and an offline adversarial
+evaluation harness). Later milestones change the surface and require this
+document to be updated.
 
 ## 1. Assets
 
@@ -67,8 +68,9 @@ claims in text are meaningless.
 | 23 | Unauthorized approval read (existence oracle) | `approvals:read` required; non-reviewers are scoped to their own records; other principals' records return **404** (never 403), so existence is not confirmed (tested) | scoping is per-process; forward to real authz when auth lands |
 | 24 | Unknown log level/format silently falls back | Unknown `RASP_LOG_LEVEL`/`RASP_LOG_FORMAT` **refuse startup** (tested) | none known |
 | 25 | Local-model provider failure treated as "no action" / crashes the request | Any adapter error (transport, non-2xx, malformed JSON, missing field) raises `ModelAdapterError`; the orchestrator fails closed with `model_unavailable` and **executes no tool** (tested offline via injected transport) | model availability is an operational dependency |
-| 26 | Local model proposes unsafe/malicious tool calls | Same enforcement as the mock: proposals are untrusted, schema-validated, and policy-checked; smuggled arguments, unknown tools, missing permissions are denied (tested adversarially) | how often a *real* model does this is unmeasured until M5 |
+| 26 | Local model proposes unsafe/malicious tool calls | Same enforcement as the mock: proposals are untrusted, schema-validated, and policy-checked; smuggled arguments, unknown tools, missing permissions are denied (tested adversarially) | how often a *real* model does this is unmeasured (the M5 harness scores RASP enforcement, not model propensity) |
 | 27 | Credentials/prompts leak through the local adapter | No cloud credentials required; only `RASP_LOCAL_MODEL_API_KEY` (optional, never logged) is sent; prompts/args/outputs never logged; error details carry status/type only (tested) | the local runtime itself is outside RASP's trust boundary |
+| 28 | Enforcement regression goes unnoticed | The M5 offline harness runs a corpus of attacks through the real pipeline and scores prevention/containment; committed report + JSON are asserted to match a fresh run, and a deliberately-broken case must be reported as a failure (tested) | a finite hand-written corpus; 100% ≠ un-breakable |
 
 ## 5. Explicit non-claims
 
@@ -83,8 +85,10 @@ RASP does **not** claim to:
 - protect against a malicious party who can read or alter the logs' sink
   (aggregation, retention, and access control for logs is deployment's job);
 - guarantee the safety of a *local model's* outputs — RASP contains and denies
-  unsafe proposals, but does not make the model itself safe (M4 measures
-  plumbing, not model behavior);
+  unsafe proposals, but does not make the model itself safe (M4/M5 measure
+  plumbing and enforcement, not model behavior);
+- claim that a 100% M5 prevention rate proves RASP is un-breakable — the corpus
+  is finite and hand-written;
 - be bias-free, jailbreak-proof, or certified.
 
 ## 6. Assumptions
@@ -115,3 +119,4 @@ RASP does **not** claim to:
 | Pattern-based redaction misses novel secret formats | medium | documented limitation; defense-in-depth layer only |
 | No rate limiting / concurrency controls | medium | pre-deployment requirement |
 | Injection indicators may false-positive on coursework | low | flags are advisory; authorization unaffected |
+| M5 corpus is finite and hand-written | medium | prevents regressions on known attacks; new attack shapes require corpus additions (documented in `docs/LIMITATIONS.md`) |

@@ -1,7 +1,7 @@
 # RASP — Architecture
 
-**Status:** Milestone 4 (mock + local LLM adapters, PostgreSQL persistence,
-approval decision API, structured logging) ·
+**Status:** Milestone 5 (mock + local LLM adapters, PostgreSQL persistence,
+approval decision API, structured logging, adversarial evaluation harness) ·
 **Version:** 0.1.0 · **Not production-certified**
 
 ## 1. Purpose
@@ -212,6 +212,7 @@ Security-relevant properties:
 | `persistence/` | SQLAlchemy models, async engine, PostgreSQL audit/approval/policy repositories |
 | `privacy/redaction.py` | secret-shape redaction, truncation |
 | `risk/signals.py` | injection indicators (defense in depth) |
+| `evaluation/` | offline adversarial corpus + harness + report renderer/runner (M5) |
 
 ## 8. Approval lifecycle (Milestone 3)
 
@@ -242,3 +243,38 @@ express a forged `approved`/`role` claim. Repeating the same decision is
 idempotent (`200`, unchanged); a conflicting decision is `409`
 `invalid_approval_transition`. Every decision emits a content-free
 `approval_decided` audit event.
+
+## 9. Adversarial evaluation (Milestone 5)
+
+An offline, deterministic harness that proves the enforcement claims above
+still hold under attack.
+
+```text
+corpus.py  (declared attacks + expected enforcement outcome)
+   │
+   ▼
+harness.py  ── each case ──► fresh app (in_memory) ──► ASGI transport
+   │                              (real policy/executor/approval pipeline)
+   │  observe only: HTTP status, reason codes, action_status,
+   │  security flags, execution log — never internal state
+   ▼
+score: prevented  iff every declared expectation holds
+       false_allow iff a forbidden guarded handler executed
+       false_deny  iff a declared minimum of executions did not occur
+   │
+   ▼
+report.py  ──► docs/ADVERSARIAL_EVALUATION.md   (human-readable)
+           └─► docs/adversarial_evaluation.json (machine-readable)
+```
+
+- The harness is an **observer**: it uses the public HTTP surface and the
+  registered tools' execution log, exactly as an external evaluator would. It
+  cannot weaken or bypass enforcement.
+- Metrics (prevention rate, false allows/denies, per-category, per-threat) are
+  **derived from per-case verdicts**, so a headline number cannot disagree with
+  what ran.
+- `tests/evaluation/` asserts (a) the whole corpus is prevented, (b) the
+  committed artifacts equal a fresh run, and (c) **the tester works** — a case
+  with a violated expectation is reported as a failure, not silently passed.
+- M5 measures **RASP enforcement**, not a real model's propensity to attack
+  (documented in `docs/LIMITATIONS.md`).

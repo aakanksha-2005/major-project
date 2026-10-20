@@ -29,7 +29,7 @@ approvals, and risk scores cannot override application-enforced permissions.
 | M2 | PostgreSQL persistence (SQLAlchemy, Alembic) | ✅ done |
 | M3 | Approval decision endpoints, reviewer authz, idempotency, structured logging | ✅ done |
 | M4 | Local LLM adapter (OpenAI-compatible + Ollama native) | ✅ done |
-| M5 | Adversarial evaluation report with metrics | planned |
+| M5 | Adversarial evaluation report with metrics | ✅ done |
 | M6 | Controlled pilot preparation | planned |
 
 **Implemented now:** deterministic mock model, **local LLM adapters
@@ -43,11 +43,13 @@ digest-bound approvals with a validated state machine and **single-use
 consumption**, reviewer decision endpoints (`approve`/`reject`/`revoke`) with
 separation of duties and scoped read access, idempotent decisions, structured
 JSON logging with request-id correlation, body-size limits, development header
-identity, REST API, **277 automated tests** (including 14 that run against a
-real PostgreSQL instance).
+identity, REST API, **a deterministic offline adversarial evaluation harness
+with a generated report ([docs/ADVERSARIAL_EVALUATION.md](docs/ADVERSARIAL_EVALUATION.md))**,
+and **289 automated tests** (including 14 that run against a real PostgreSQL
+instance).
 
-**Planned (not implemented):** rate limiting, real authentication,
-comparative evaluation harness.
+**Planned (not implemented):** rate limiting, real authentication, a
+comparative harness that measures real models' safety behavior.
 
 ## 3. Architecture and request lifecycle
 
@@ -85,10 +87,11 @@ Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## 5. Features: implemented vs planned
 
 See status table in §2. Every "implemented" claim is covered by a test in
-`tests/` and was executed for this release (**277 passed**, including 14
+`tests/` and was executed for this release (**289 passed**, including 14
 PostgreSQL-backed tests; 0 skipped when the database is running, and the
 PostgreSQL tests **skip with an explicit reason** — never silently — when it
-is not). Model-adapter tests are fully offline (injected `httpx.MockTransport`).
+is not). Model-adapter tests are fully offline (injected `httpx.MockTransport`);
+the M5 evaluation harness is fully offline and deterministic.
 
 ## 6. Supported model adapters
 
@@ -295,6 +298,37 @@ uv run uvicorn rasp.main:app --reload
   `tests/integration/test_local_model_api.py`,
   `tests/adversarial/test_local_model_adversarial.py`).
 
+## 13b. Adversarial evaluation harness (Milestone 5)
+
+RASP ships a **reproducible, offline adversarial evaluation harness**: a corpus
+of attack scenarios driven through the *real* ASGI pipeline, scored by whether
+enforcement contained them, rendered into a committed report.
+
+```powershell
+uv run python -m rasp.evaluation.runner            # write report + results
+uv run python -m rasp.evaluation.runner --check    # fail if any case failed
+```
+
+- **Corpus** (`src/rasp/evaluation/corpus.py`): cases across identity
+  escalation, approval forgery/replay/binding/duties, tool & argument
+  manipulation, prompt injection, audit-scope escape, and resource exhaustion.
+  Each case references the `T-ids` in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- **Harness** (`harness.py`): drives each case through the app in explicit
+  `in_memory` mode. A case counts as **prevented** only when *every* declared
+  expectation holds — required statuses, required reason codes, and the guarded
+  mutating handler absent from the execution log. A single unmet expectation is
+  reported as a **failure**; metrics are derived from those verdicts and cannot
+  drift from what ran.
+- **Artifacts:** [docs/ADVERSARIAL_EVALUATION.md](docs/ADVERSARIAL_EVALUATION.md)
+  (human-readable) and `docs/adversarial_evaluation.json` (machine-readable).
+  Tests assert the committed artifacts match a fresh run, and **test the tester**
+  (a deliberately-broken case must be reported as a failure).
+
+The current run: **16/16 cases prevented, 0 false allows, 0 false denies.** This
+measures whether *RASP's enforcement layer* contains a declared attack; it does
+**not** measure a real LLM's propensity to attempt attacks, and a 100% rate is
+not a security proof (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
+
 ## 14. Policy configuration
 
 Single YAML file, validated at startup; the app **refuses to start** on
@@ -321,12 +355,13 @@ permission → approval → allow. A deny at any step is final.
 ## 15. Running automated tests (verified)
 
 ```powershell
-uv run pytest                  # full suite: 277 passed (with PostgreSQL running)
-uv run pytest -m "not postgres"  # 263 passed / 14 skipped — no database required
+uv run pytest                  # full suite: 289 passed (with PostgreSQL running)
+uv run pytest -m "not postgres"  # 275 passed / 14 skipped — no database required
 uv run pytest -m postgres        # 14 passed against rasp_test
 uv run pytest tests/unit
 uv run pytest tests/integration
 uv run pytest tests/adversarial
+uv run pytest tests/evaluation
 uv run ruff check src tests migrations    # All checks passed
 uv run ruff format --check src tests migrations
 ```
@@ -372,7 +407,9 @@ against any database name lacking "test".
 - A risk score is never evidence of wrongdoing; explanations for denials
   are generic and reviewable by humans.
 - Do not claim "jailbreak-proof", "100% secure", "bias-free", or
-  "certified" — no such evidence exists for this prototype.
+  "certified" — no such evidence exists for this prototype. The M5 report's
+  100% prevention rate means the *documented adversarial corpus* was
+  contained, not that RASP is un-breakable.
 - Fairness/accessibility evaluation across languages and user groups has
   **not** been performed yet and is required before any real-world pilot.
 
@@ -381,8 +418,9 @@ against any database name lacking "test".
 Summarized: development-only identity; PostgreSQL fails closed but is a
 single unencrypted instance (no HA/signing, `in_memory` remains an opt-out);
 pattern-based injection/secret detection is incomplete; no rate limiting; the
-local model adapter is fail-closed but real local-model misbehavior is not yet
-measured (M5); approval reviewer authz rests on the same forgeable dev
+local model adapter is fail-closed but real local-model safety behavior is not
+yet measured (the M5 harness scores *RASP's enforcement*, not a model's
+propensity to attack); approval reviewer authz rests on the same forgeable dev
 headers until production authentication lands; single-process prototype.
 Full list: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 

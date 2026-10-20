@@ -44,7 +44,15 @@ Individual groups:
 uv run pytest tests/unit
 uv run pytest tests/integration
 uv run pytest tests/adversarial
+uv run pytest tests/evaluation
 uv run pytest tests/postgres
+```
+
+Regenerate the M5 adversarial evaluation report (offline, deterministic; the
+committed report and JSON must match this run):
+
+```powershell
+uv run python -m rasp.evaluation.runner --check
 ```
 
 ## 4. Configuration
@@ -124,6 +132,10 @@ Missing headers ⇒ zero permissions ⇒ everything sensitive is denied
   limits, approval forging/replay/self-approval, log content, and hostile
   local-model output (tool calls, smuggled arguments, authority claims);
   every assertion proves enforcement or flags the gap honestly.
+- **Evaluation** (`tests/evaluation/`) — runs the M5 adversarial corpus through
+  the real pipeline, asserts total prevention with zero false allows/denies,
+  asserts the committed report/JSON match a fresh run, and tests the harness
+  itself (a violated expectation must be reported as a failure).
 - **PostgreSQL** (`tests/postgres/`, marker `postgres`) — real database:
   clean migration state (head `0002_approval_consumed`), restart durability
   (incl. consumed approvals), approval transitions, race-safe claim,

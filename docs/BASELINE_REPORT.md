@@ -41,12 +41,19 @@ on Python 3.14.
 
 ## 4. Tests that pass or fail
 
-Latest full run (Milestone 4):
+Latest full run (Milestone 5):
 
 ```
-277 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
-263 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
+289 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
+275 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
 ruff check src tests migrations   -> All checks passed!
+```
+
+M5 adversarial evaluation (offline, deterministic):
+
+```
+uv run python -m rasp.evaluation.runner --check
+cases=16 prevented=16 failures=0 prevention_rate=100.0% false_allows=0 false_denies=0
 ```
 
 Live verification (real HTTP against `uvicorn rasp.main:app`):
@@ -85,7 +92,9 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 - Source: `src/rasp/**` (gateway, models, tools, policy, risk, approvals,
   executor, audit, privacy, auth, api, schemas, container, main, settings)
 - Policy: `config/policies.example.yaml`
-- Tests: `tests/{unit,integration,adversarial,postgres}/**` (277 tests)
+- Tests: `tests/{unit,integration,adversarial,postgres,evaluation}/**` (289 tests)
+- Evaluation: `src/rasp/evaluation/**` (corpus, harness, report, runner),
+  `docs/ADVERSARIAL_EVALUATION.md`, `docs/adversarial_evaluation.json`
 - Docs: `docs/{BASELINE_REPORT,ARCHITECTURE,THREAT_MODEL,LIMITATIONS,DEVELOPMENT}.md`,
   `README.md` (replaces placeholder), `scripts/*`
 
@@ -98,7 +107,7 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 | M2 | PostgreSQL persistence (SQLAlchemy, Alembic, repositories) | **done** |
 | M3 | Approval lifecycle endpoints, reviewer authz, idempotency, structured logging | **done** |
 | M4 | Local LLM adapter (OpenAI-compatible + Ollama native, fail-closed) | **done** |
-| M5 | Adversarial evaluation report with metrics | next |
+| M5 | Adversarial evaluation report with metrics | **done** |
 | M6 | Controlled pilot preparation | planned |
 
 **Constraint honored:** no live systems, real personal data, or production
