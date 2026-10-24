@@ -27,7 +27,7 @@ Honest disclosure of what is and is not covered. Updated per milestone.
 | Adversarial evaluation harness: corpus runs the real pipeline, scores prevention/containment, regenerates the committed report, and the tester itself is tested (broken cases must fail) | `tests/evaluation/test_evaluation_harness.py`, `docs/ADVERSARIAL_EVALUATION.md` |
 | Controlled-pilot readiness gate: unknown mode refuses startup; missing/unknown acknowledgement id refuses startup; complete acknowledgements enable controlled mode; pilot mode grants no extra authority and does not leak via `/v1/health` | `tests/unit/test_pilot_readiness.py` |
 
-Current run: **303 passed, 0 skipped** with PostgreSQL running (289 of them
+Current run: **304 passed, 0 skipped** with PostgreSQL running (290 of them
 need no database; the 14 `postgres`-marked tests skip with an explicit reason
 when it is not). Lint and format clean.
 

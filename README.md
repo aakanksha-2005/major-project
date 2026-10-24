@@ -47,7 +47,7 @@ identity, REST API, **a deterministic offline adversarial evaluation harness
 with a generated report ([docs/ADVERSARIAL_EVALUATION.md](docs/ADVERSARIAL_EVALUATION.md))**,
 **a machine-checked controlled-pilot readiness gate
 ([docs/PILOT_READINESS.md](docs/PILOT_READINESS.md), [docs/GOVERNANCE.md](docs/GOVERNANCE.md),
-[docs/PILOT_PLAN.md](docs/PILOT_PLAN.md))**, and **303 automated tests**
+[docs/PILOT_PLAN.md](docs/PILOT_PLAN.md))**, and **304 automated tests**
 (including 14 that run against a real PostgreSQL instance).
 
 **Planned (not implemented):** rate limiting, real authentication,
@@ -90,7 +90,7 @@ Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## 5. Features: implemented vs planned
 
 See status table in §2. Every "implemented" claim is covered by a test in
-`tests/` and was executed for this release (**303 passed**, including 14
+`tests/` and was executed for this release (**304 passed**, including 14
 PostgreSQL-backed tests; 0 skipped when the database is running, and the
 PostgreSQL tests **skip with an explicit reason** — never silently — when it
 is not). Model-adapter tests are fully offline (injected `httpx.MockTransport`);
@@ -311,7 +311,7 @@ enforcement contained them, rendered into a committed report.
 
 ```powershell
 uv run python -m rasp.evaluation.runner            # write report + results
-uv run python -m rasp.evaluation.runner --check    # fail if any case failed
+uv run python -m rasp.evaluation.runner --check    # verify only; fail if any case failed
 ```
 
 - **Corpus** (`src/rasp/evaluation/corpus.py`): cases across identity
@@ -389,8 +389,8 @@ permission → approval → allow. A deny at any step is final.
 ## 15. Running automated tests (verified)
 
 ```powershell
-uv run pytest                  # full suite: 303 passed (with PostgreSQL running)
-uv run pytest -m "not postgres"  # 289 passed / 14 skipped — no database required
+uv run pytest                  # full suite: 304 passed (with PostgreSQL running)
+uv run pytest -m "not postgres"  # 290 passed / 14 skipped — no database required
 uv run pytest -m postgres        # 14 passed against rasp_test
 uv run pytest tests/unit
 uv run pytest tests/integration

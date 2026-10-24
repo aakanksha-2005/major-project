@@ -3,13 +3,15 @@
 Usage:
 
     uv run python -m rasp.evaluation.runner            # write report + results
-    uv run python -m rasp.evaluation.runner --check     # fail if any case failed
+    uv run python -m rasp.evaluation.runner --check     # verify only; never writes
+    uv run python -m rasp.evaluation.runner --write     # write, even with --check
 
-Writes:
+Writes (only when writing is enabled):
     docs/ADVERSARIAL_EVALUATION.md   (human-readable report)
     docs/adversarial_evaluation.json (machine-readable results)
 
-Exits non-zero on any failure when ``--check`` is given, so CI can gate on it.
+``--check`` is a *verification* gate: it never mutates the working tree, so a
+clean checkout stays clean. Exits non-zero when any case failed.
 """
 
 from __future__ import annotations
@@ -49,20 +51,41 @@ async def _main(write: bool, check: bool) -> int:
     return 0
 
 
+def resolve_write(*, no_write: bool, check: bool, write: bool) -> bool:
+    """Decide whether artifacts are written (pure, so it is testable).
+
+    - ``--no-write`` always wins (never write).
+    - ``--check`` is verification-only, so it does not write by default:
+      a clean checkout stays clean after a gate run.
+    - ``--write`` explicitly re-enables writing (e.g. ``--check --write``).
+    """
+    if no_write:
+        return False
+    if write:
+        return True
+    return not check
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the RASP adversarial evaluation.")
     parser.add_argument(
         "--no-write",
         action="store_true",
-        help="do not write report artifacts (print metrics only)",
+        help="never write report artifacts (wins over --write)",
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="write report artifacts even when --check is given",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit non-zero if any case failed",
+        help="verify only (no writes); exit non-zero if any case failed",
     )
     args = parser.parse_args()
-    return asyncio.run(_main(write=not args.no_write, check=args.check))
+    write = resolve_write(no_write=args.no_write, check=args.check, write=args.write)
+    return asyncio.run(_main(write=write, check=args.check))
 
 
 if __name__ == "__main__":

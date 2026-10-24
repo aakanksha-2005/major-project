@@ -49,10 +49,12 @@ uv run pytest tests/postgres
 ```
 
 Regenerate the M5 adversarial evaluation report (offline, deterministic; the
-committed report and JSON must match this run):
+committed report and JSON must match this run). `--check` verifies without
+writing, so a clean checkout stays clean; use `--write` to regenerate:
 
 ```powershell
-uv run python -m rasp.evaluation.runner --check
+uv run python -m rasp.evaluation.runner --check   # verify, no writes
+uv run python -m rasp.evaluation.runner --write   # regenerate artifacts
 ```
 
 ## 4. Configuration

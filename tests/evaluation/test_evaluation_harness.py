@@ -144,6 +144,19 @@ def test_harness_detects_a_containment_breach():
 # --- committed artifacts must match a fresh run ------------------------------
 
 
+def test_resolve_write_policy():
+    """`--check` must be verification-only so a clean checkout stays clean."""
+    from rasp.evaluation.runner import resolve_write
+
+    # Plain run writes; verification runs do not.
+    assert resolve_write(no_write=False, check=False, write=False) is True
+    assert resolve_write(no_write=False, check=True, write=False) is False
+    # Explicit flags win.
+    assert resolve_write(no_write=False, check=True, write=True) is True
+    assert resolve_write(no_write=True, check=False, write=False) is False
+    assert resolve_write(no_write=True, check=False, write=True) is False
+
+
 def _strip_run_timestamps(text: str) -> str:
     """Drop the per-run timestamps so artifact comparisons are deterministic."""
     out = []

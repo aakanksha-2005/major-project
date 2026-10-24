@@ -44,8 +44,8 @@ on Python 3.14.
 Latest full run (Milestone 6):
 
 ```
-303 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
-289 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
+304 passed, 0 skipped   (with PostgreSQL running; 14 are postgres-marked)
+290 passed, 14 skipped  (no PostgreSQL: postgres tests SKIP with an explicit reason)
 ruff check src tests migrations   -> All checks passed!
 ```
 
@@ -92,7 +92,7 @@ See README and `docs/ARCHITECTURE.md`. Summary:
 - Source: `src/rasp/**` (gateway, models, tools, policy, risk, approvals,
   executor, audit, privacy, auth, api, schemas, container, main, settings)
 - Policy: `config/policies.example.yaml`
-- Tests: `tests/{unit,integration,adversarial,postgres,evaluation}/**` (303 tests)
+- Tests: `tests/{unit,integration,adversarial,postgres,evaluation}/**` (304 tests)
 - Evaluation: `src/rasp/evaluation/**` (corpus, harness, report, runner),
   `docs/ADVERSARIAL_EVALUATION.md`, `docs/adversarial_evaluation.json`
 - Pilot governance: `src/rasp/pilot/**` (readiness gate),
